@@ -1,6 +1,6 @@
 import pytest
 import os
-from pysheds.grid import Grid
+from pysheds.pgrid import Grid
 import numpy as np
 
 dirmap = (64, 128, 1, 2, 4, 8, 16, 32)
@@ -23,10 +23,11 @@ def generate_paths():
 def generate_grids():
     paths = generate_paths()
     grids = dict()
-    grids["grid"] = Grid.from_raster(paths["dem_path"])
-    grids["fdir"] = grids["grid"].read_ascii(paths["dir_path"], dtype=np.uint8, crs=grids["grid"].crs)
-    grids["dem"] = grids["grid"].read_raster(paths["dem_path"])
-    grids["roi"] = grids["grid"].read_raster(paths["roi_path"])
+    # pgrid API requires data_name parameter
+    grids["grid"] = Grid.from_raster(paths["dem_path"], "dem")
+    grids["fdir"] = grids["grid"].read_ascii(paths["dir_path"], "fdir", crs=grids["grid"].crs)
+    grids["dem"] = grids["grid"].read_raster(paths["dem_path"], "dem")
+    grids["roi"] = grids["grid"].read_raster(paths["roi_path"], "roi")
 
     return grids
 
