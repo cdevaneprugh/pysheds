@@ -275,13 +275,17 @@ class TestRiverNetworkLengthSlope:
         acc = grid.acc
         acc_mask = acc > 100
 
-        try:
-            length, slope = grid.river_network_length_and_slope(
-                "fdir", "dem", mask=acc_mask, dirmap=DIRMAP
-            )
-            assert length is not None or slope is not None
-        except (AttributeError, TypeError) as e:
-            pytest.skip(f"Method not fully implemented: {e}")
+        # Method signature: river_network_length_and_slope(fdir, mask, dirmap=None, ...)
+        # Returns a dictionary with keys: length, slope, mch_length, mch_slope, etc.
+        result = grid.river_network_length_and_slope(
+            "fdir", acc_mask, dirmap=DIRMAP
+        )
+
+        assert isinstance(result, dict)
+        assert "length" in result
+        assert "slope" in result
+        assert result["length"] is not None
+        assert result["slope"] is not None
 
 
 class TestIntegration:
