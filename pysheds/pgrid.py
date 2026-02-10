@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import geojson
 from affine import Affine
-from distutils.version import LooseVersion
+from looseversion import LooseVersion
 try:
     import scipy.sparse
     import scipy.spatial
@@ -1268,7 +1268,7 @@ class Grid(object):
                     nodata_cells = (np.isnan(fdir))
                 else:
                     nodata_cells = (fdir == nodata_in)
-            invalid_cells = ~np.in1d(fdir.ravel(), dirmap)
+            invalid_cells = ~np.isin(fdir.ravel(), dirmap)
             invalid_entries = fdir.flat[invalid_cells]
             fdir.flat[invalid_cells] = 0
             # Ensure consistent types
@@ -3047,7 +3047,7 @@ class Grid(object):
             indegree = (np.bincount(end)).astype(np.uint8)
             forks_end = np.flatnonzero(indegree > 1)
             # Find fork nodes
-            is_fork = np.in1d(end, forks_end)
+            is_fork = np.isin(end, forks_end)
             forks = pd.Series(end[is_fork], index=start[is_fork])
             # Cut endnode at forks
             endnodes[start[is_fork]] = 0
@@ -3060,7 +3060,7 @@ class Grid(object):
             endnodes[two_upstream == startnodes] = 0
 
             end = endnodes[start]
-            no_pred = ~np.in1d(start, end)
+            no_pred = ~np.isin(start, end)
             start = start[no_pred]
             end = endnodes[start]
 
@@ -3873,7 +3873,7 @@ class Grid(object):
         minsteps = minsteps[minsteps != 0].groupby(level=0).min()
         gradmax = pd.Series(drainage_grad.flat[inside][flats.flat[inside]],
                             index=flatlabels).groupby(level=0).max().astype(int)
-        gradfactor = (0.9 * (minsteps / gradmax)).replace(np.inf, 0)._append(pd.Series({0 : 0}))
+        gradfactor = pd.concat([(0.9 * (minsteps / gradmax)).replace(np.inf, 0), pd.Series({0 : 0})])
         drainage_grad.flat[inside[flats.flat[inside]]] *= gradfactor[flatlabels].values
         drainage_grad.flat[inside[low_edge_cells]] = 0
         dem_out = dem.astype(np.float64) + drainage_grad
