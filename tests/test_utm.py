@@ -155,6 +155,21 @@ def grid_with_hand(processed_grid):
     return grid
 
 
+@pytest.fixture(scope="module")
+def grid_with_river_stats(processed_grid):
+    """Run river_network_length_and_slope on the V-valley UTM DEM.
+
+    The V-valley has no flats, so resolve_flats was skipped; aliasing
+    inflated_dem = dem is correct (no inflation needed). The function
+    needs inflated_dem to extract channel elevation profiles.
+    """
+    grid = processed_grid
+    grid.inflated_dem = grid.dem
+    acc_mask = grid.acc > NROWS
+    result = grid.river_network_length_and_slope("fdir", acc_mask, dirmap=DIRMAP)
+    return result
+
+
 class TestCRSDetection:
     """Test that the CRS helper correctly identifies geographic vs projected."""
 
@@ -228,29 +243,15 @@ class TestAspect:
         # Tolerance: 0.5 deg
         assert east_aspect == pytest.approx(expected, abs=0.5)
 
-    def test_aspect_not_buggy(self, grid_with_slope_aspect, expectations):
-        """Aspect should NOT match the known buggy values (N/S swap)."""
-        grid = grid_with_slope_aspect
-        buggy_west = expectations["buggy_aspect_west_side"]
-        buggy_east = expectations["buggy_aspect_east_side"]
-        channel_col = expectations["channel_col"]
-
-        margin = 3
-        edge = 2
-
-        west_aspect = grid.aspect[edge:-edge, edge : channel_col - margin]
-        east_aspect = grid.aspect[edge:-edge, channel_col + margin + 1 : -edge]
-
-        west_mean = np.nanmean(west_aspect)
-        east_mean = np.nanmean(east_aspect)
-
-        # These should NOT match buggy values (differ by ~3.8 deg)
-        assert abs(west_mean - buggy_west) > 1.0
-        assert abs(east_mean - buggy_east) > 1.0
-
 
 class TestHAND:
-    """Test HAND computation on V-valley UTM DEM."""
+    """Test HAND computation on V-valley UTM DEM.
+
+    Pipeline validation, not CRS tests. HAND is a pure elevation difference
+    (dem[pixel] - dem[drainage_pixel]) — no distance computation involved.
+    These verify that D8 routing and HAND computation work on UTM data, not
+    that distance calculations use the correct CRS formula.
+    """
 
     def test_hand_values(self, grid_with_hand, expectations):
         """HAND should equal cross_slope * abs(col - channel_col) * pixel_size.
@@ -348,7 +349,12 @@ class TestDTND:
             )
 
     def test_dtnd_channel_is_zero(self, grid_with_hand, expectations):
-        """DTND at channel pixels should be zero."""
+        """DTND at channel pixels should be zero.
+
+        CRS-independent: channel pixels have hndx pointing to themselves
+        (pgrid.py:1935), so dlon=dlat=0 -> distance=0 for both haversine
+        and Euclidean.
+        """
         grid = grid_with_hand
         channel_col = expectations["channel_col"]
 
@@ -420,9 +426,9 @@ class TestAZND:
     def test_aznd_channel_points_downstream(self, grid_with_hand, expectations):
         """Channel pixels drain to a downstream channel pixel -> AZND ~ 180 deg.
 
-        Channel pixels are not their own drainage outlet. The D8 traversal
-        traces each channel pixel to a downstream channel pixel. In the
-        V-valley, downstream is pure south (180 deg).
+        CRS-independent: channel hndx points to self, so dlon=dlat=0.
+        AZND = arctan2(-0.0, -0.0) = -pi -> 180 deg (IEEE 754 signed-zero
+        behavior). Tests hndx topology, not CRS distance computation.
         """
         grid = grid_with_hand
         channel_col = expectations["channel_col"]
@@ -434,6 +440,34 @@ class TestAZND:
         assert channel_aznd == pytest.approx(180.0, abs=1.0), (
             f"Channel AZND should be ~180 (south/downstream), got range "
             f"[{channel_aznd.min():.2f}, {channel_aznd.max():.2f}]"
+        )
+
+
+class TestRiverNetworkLengthSlope:
+    """Test river_network_length_and_slope() on V-valley UTM DEM.
+
+    CRS test: haversine interprets 5m pixel spacing as 5 degrees of
+    latitude, producing ~556 km per segment (~110,000 km total) vs the
+    correct ~995m. This test catches that failure mode.
+    """
+
+    def test_channel_length(self, grid_with_river_stats):
+        """Total reach length should be ~995m, not haversine garbage."""
+        result = grid_with_river_stats
+        expected_length = (NROWS - 1) * PIXEL_SIZE  # 995m
+        assert result["length"] == pytest.approx(expected_length, rel=0.1)
+
+    def test_channel_slope(self, grid_with_river_stats):
+        """Mean reach slope should be ~0.001 m/m."""
+        result = grid_with_river_stats
+        assert result["slope"] == pytest.approx(DOWNSTREAM_SLOPE, rel=0.1)
+
+    def test_length_not_haversine_garbage(self, grid_with_river_stats):
+        """Length should be < 2km, not ~110,000 km from haversine."""
+        result = grid_with_river_stats
+        assert result["length"] < 2000, (
+            f"Total length = {result['length']:.0f}m. "
+            f"Expected ~995m, not haversine garbage."
         )
 
 
