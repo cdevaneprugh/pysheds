@@ -126,6 +126,27 @@ class Grid(object):
         }
         return props
 
+    def _crs_is_geographic(self):
+        """Check whether the grid's CRS is geographic (lat/lon) or projected (e.g. UTM).
+
+        This distinction controls how spatial distances are computed throughout
+        the codebase:
+
+        - Geographic CRS (e.g. EPSG:4326): Coordinates are longitude/latitude
+          in degrees. Distances must be computed via the haversine formula,
+          which accounts for Earth's curvature.
+
+        - Projected CRS (e.g. UTM EPSG:32617): Coordinates are easting/northing
+          in linear units (meters for UTM). Distances can be computed via simple
+          Euclidean math — sqrt(dx² + dy²) — because the projection has already
+          mapped the curved surface to a flat plane.
+
+        Edge case: A local/engineering CRS with no EPSG code will return False
+        (not geographic), which is the correct default since local CRS use
+        linear units and Euclidean distance is appropriate.
+        """
+        return getattr(_pyproj_crs(self.crs), _pyproj_crs_is_geographic)
+
     def add_gridded_data(self, data, data_name, affine=None, shape=None, crs=None,
                          nodata=None, mask=None, metadata={}):
         """
@@ -1739,9 +1760,16 @@ class Grid(object):
                                     inplace=inplace, metadata=metadata)
 
     def _2d_geographic_coordinates(self):
-        """
-        2D geographic coordinate arrays
+        """Return 2D coordinate arrays in the grid's CRS.
 
+        Despite the name, this method returns coordinates in whatever CRS
+        the grid uses — NOT necessarily geographic coordinates. For geographic
+        CRS these are lon/lat in degrees; for projected CRS (e.g. UTM) these
+        are easting/northing in meters. The variable names lon2d/lat2d are
+        retained for compatibility with existing callers.
+
+        The affine transform maps pixel indices (col, row) to CRS coordinates.
+        The 0.5*dx / 0.5*dy offset shifts from pixel corner to pixel center.
         """
 
         x = self.affine
@@ -1925,29 +1953,76 @@ class Grid(object):
                     drainage_id = np.where(hndx != -1, channel_id.flat[hndx], -1).astype(int)
                     self._output_handler(data=drainage_id, out_name='drainage_id', properties=properties,inplace=inplace, metadata=metadata)
 
-                    # calculate distance to nearest channel
-                    dtnd = np.zeros(dem.shape)
-
+                    # --- Distance To Nearest Drainage (DTND) ---
+                    #
+                    # Compute the straight-line distance from each pixel to the
+                    # drainage pixel it flows to (its hydrologically nearest channel
+                    # pixel). This is NOT the shortest Euclidean distance to any
+                    # channel pixel — it's the distance to the specific channel pixel
+                    # found by tracing D8 flow directions downstream.
+                    #
+                    # hndx (computed above at line ~1923) stores the flat array index
+                    # of each pixel's drainage outlet. It's CRS-independent — purely
+                    # topological, determined by the D8 flow direction graph.
+                    #
+                    # dlon/dlat below are coordinate differences FROM drainage pixel
+                    # TO current pixel (i.e. current - drainage). The sign doesn't
+                    # matter for distance (we square them), but it does matter for
+                    # AZND below.
                     dlon = lon2d-lon2d.flat[hndx]
                     dlat = lat2d-lat2d.flat[hndx]
-                    dtr = np.pi/180
-                    # haversine formula
-                    dtnd = np.power(np.sin(dtr*dlat/2),2) + np.cos(dtr*lat2d) * np.cos(dtr*lat2d.flat[hndx]) * np.power(np.sin(dtr*dlon/2),2)
-                    dtnd[dtnd > 1] = 1
-                    dtnd[dtnd < 0] = 0
-                    dtnd = (6.371e6 * 2 * np.arctan2( np.sqrt(dtnd), np.sqrt(1-dtnd)))
-                    #dtnd = np.where(hndx != -1, dtnd, nodata_out)
+
+                    if self._crs_is_geographic():
+                        # Geographic CRS: coordinates are lon/lat in degrees.
+                        # Must use the haversine formula to compute great-circle
+                        # distance on the sphere. Feeding UTM meter values into
+                        # this formula produces garbage (it interprets e.g.
+                        # 400000m as 400000 degrees).
+                        dtr = np.pi/180
+                        re = 6.371e6  # Earth radius in meters
+                        dtnd = np.power(np.sin(dtr*dlat/2),2) + np.cos(dtr*lat2d) * np.cos(dtr*lat2d.flat[hndx]) * np.power(np.sin(dtr*dlon/2),2)
+                        dtnd[dtnd > 1] = 1
+                        dtnd[dtnd < 0] = 0
+                        dtnd = (re * 2 * np.arctan2( np.sqrt(dtnd), np.sqrt(1-dtnd)))
+                    else:
+                        # Projected CRS (e.g. UTM): coordinates are already in
+                        # linear units (meters for UTM). Euclidean distance is
+                        # exact on the projected plane. UTM distortion is < 0.04%
+                        # within a single zone, so the error is negligible.
+                        dtnd = np.sqrt(dlon**2 + dlat**2)
                     dtnd = np.where(hndx != -1, dtnd, 0)
 
                     self._output_handler(data=dtnd, out_name='dtnd', properties=properties,inplace=inplace, metadata=metadata)
 
-                    # calculate angle wrt nearest channel
-                    # points toward hndx, so reverse dlon
-                    aznd = np.zeros(dem.shape)
-                    aznd = np.arctan2(np.sin(-dtr*dlon),(np.cos(dtr*lat2d)*np.tan(dtr*lat2d.flat[hndx]) - np.sin(dtr*lat2d)*np.cos(-dtr*dlon)))
-                    aznd = aznd/dtr
+                    # --- Azimuth to Nearest Drainage (AZND) ---
+                    #
+                    # Compute the compass bearing FROM each pixel TO its drainage
+                    # outlet. Convention: 0° = north, 90° = east, 180° = south,
+                    # 270° = west (standard geographic azimuth).
+                    #
+                    # Sign convention for dlon/dlat (computed above):
+                    #   dlon = lon_pixel - lon_drainage  (FROM drainage TO pixel)
+                    #   dlat = lat_pixel - lat_drainage  (FROM drainage TO pixel)
+                    #
+                    # We want the bearing FROM pixel TO drainage, which is the
+                    # REVERSE direction. Hence we negate both components.
+                    #
+                    # arctan2(x, y) with x = east component, y = north component
+                    # gives clockwise-from-north azimuth (geographic convention).
+                    if self._crs_is_geographic():
+                        # Spherical bearing formula. The sin(-dlon) and cos(-dlon)
+                        # terms negate dlon for the same reason: reversing the
+                        # vector from "drainage→pixel" to "pixel→drainage".
+                        dtr = np.pi/180
+                        aznd = np.arctan2(np.sin(-dtr*dlon),(np.cos(dtr*lat2d)*np.tan(dtr*lat2d.flat[hndx]) - np.sin(dtr*lat2d)*np.cos(-dtr*dlon)))
+                        aznd = aznd/dtr
+                    else:
+                        # Projected CRS: planar azimuth on the projected plane.
+                        # Negate dlon/dlat to reverse from "drainage→pixel" to
+                        # "pixel→drainage". arctan2(-dlon, -dlat) gives the
+                        # clockwise-from-north bearing in radians.
+                        aznd = np.degrees(np.arctan2(-dlon, -dlat))
                     aznd[aznd < 0] += 360
-                    #aznd = np.where(hndx != -1, aznd, 0)
 
                     self._output_handler(data=aznd, out_name='aznd', properties=properties,inplace=inplace, metadata=metadata)
 
@@ -3142,8 +3217,6 @@ class Grid(object):
                                    properties=fdir_props,
                                    ignore_metadata=ignore_metadata, **kwargs)
 
-        dtr = np.pi/180.
-        re = 6.371e6
         missing_value = -9999
         reach_length = []
         reach_elevation_difference = []
@@ -3157,6 +3230,8 @@ class Grid(object):
         dir_to_index_dict[0] = -1
         dir_to_index_dict[-1] = -1
 
+        is_geographic = self._crs_is_geographic()
+
         for index, profile in enumerate(profiles):
             endpoint = profiles[connections[index]][0]
             # endpoint doesn't seem to be part of network for some cases (?)
@@ -3166,15 +3241,28 @@ class Grid(object):
             # extract_profiles does not mask out missing values; apply mask here
             pmask = mask[yi,xi]
 
+            # plon/plat are affine-transformed coordinates along the stream
+            # reach profile. For geographic CRS these are lon/lat in degrees;
+            # for projected CRS (e.g. UTM) these are easting/northing in meters.
             plon = np.asarray((fdir.affine * (xi, yi))[0])
             plat = np.asarray((fdir.affine * (xi, yi))[1])
             plon,plat = plon[pmask],plat[pmask]
             dlon = plon[:-1] - plon[1:]
             dlat = plat[:-1] - plat[1:]
-            dist = np.power(np.sin(dtr*dlat/2),2) + np.cos(dtr*plat[:-1]) \
-                   * np.cos(dtr*plat[1:]) \
-                   * np.power(np.sin(dtr*dlon/2),2)
-            length = np.sum(re * 2 * np.arctan2(np.sqrt(dist),np.sqrt(1-dist)))
+
+            if is_geographic:
+                # Geographic CRS: coordinates are degrees. Use haversine to
+                # compute great-circle segment lengths along the reach.
+                dtr = np.pi/180.
+                re = 6.371e6
+                dist = np.power(np.sin(dtr*dlat/2),2) + np.cos(dtr*plat[:-1]) \
+                       * np.cos(dtr*plat[1:]) \
+                       * np.power(np.sin(dtr*dlon/2),2)
+                length = np.sum(re * 2 * np.arctan2(np.sqrt(dist),np.sqrt(1-dist)))
+            else:
+                # Projected CRS: coordinates are already in linear units (meters
+                # for UTM). Euclidean distance between consecutive profile pixels.
+                length = np.sum(np.sqrt(dlon**2 + dlat**2))
             elevation = self.inflated_dem[yi,xi]
             elevation = elevation[pmask]
 
@@ -4090,18 +4178,45 @@ class Grid(object):
         # elevation of central gridpoint's neighbors
         elev_neighbors = dem.flat[inner_neighbors]
 
+        # --- Convert pixel-index differences to physical distances ---
+        #
+        # _2d_geographic_coordinates() returns CRS coordinates at pixel centers:
+        #   - Geographic CRS → lon/lat in degrees
+        #   - Projected CRS (e.g. UTM) → easting/northing in meters
+        # (The method name is misleading for projected CRS; see its docstring.)
+        #
+        # dlon[k, i] and dlat[k, i] are the coordinate offsets from pixel i
+        # to its k-th neighbor (k in [N, NE, E, SE, S, SW, W, NW]).
         lon2d, lat2d = self._2d_geographic_coordinates()
         dlon = np.subtract(lon2d.flat[inner_neighbors], lon2d.flat[inside])
         dlat = np.subtract(lat2d.flat[inner_neighbors], lat2d.flat[inside])
 
-        # convert to meters
-        re = 6.371e6
-        dtr = np.pi/180
-        dx = re * np.abs(np.multiply(dtr*dlon,np.cos(dtr*lat2d.flat[inside])))
-        dy = re * np.abs(dtr*dlat)
+        # Convert coordinate differences to meters.
+        # abs() is taken because the Horn stencil cares about spacing magnitude,
+        # not direction — the directional information is encoded in which
+        # neighbors are summed vs subtracted (haxindices/hsxindices below).
+        if self._crs_is_geographic():
+            # Geographic CRS: approximate meter distances from degree offsets.
+            # dx uses a cos(lat) correction for longitude convergence toward poles.
+            # dy is simply arc length along a meridian.
+            re = 6.371e6
+            dtr = np.pi/180
+            dx = re * np.abs(np.multiply(dtr*dlon,np.cos(dtr*lat2d.flat[inside])))
+            dy = re * np.abs(dtr*dlat)
+        else:
+            # Projected CRS (e.g. UTM): the affine transform maps pixel indices
+            # directly to CRS coordinates in linear units (meters for UTM).
+            # Coordinate differences are already physical distances — no
+            # conversion needed. UTM distortion is < 0.04% within a zone.
+            dx = np.abs(dlon)
+            dy = np.abs(dlat)
 
-        mean_dx = 0.5 * np.sum(dx[[2,6],:],axis=0) # average dx west and east
-        mean_dy = 0.5 * np.sum(dy[[0,4],:],axis=0) # average dy south and north
+        # Horn 1981 uses the average spacing of the two cardinal neighbors
+        # along each axis to normalize the weighted finite difference:
+        #   mean_dx = average of east (index 2) and west (index 6) spacings
+        #   mean_dy = average of north (index 0) and south (index 4) spacings
+        mean_dx = 0.5 * np.sum(dx[[2,6],:],axis=0)
+        mean_dy = 0.5 * np.sum(dy[[0,4],:],axis=0)
 
         # for x gradient sum [NE,2xE,SE,-NW,-2xW,-SW]
         # for y gradient sum [NE,2xN,NW,-SE,-2xS,-SW]
