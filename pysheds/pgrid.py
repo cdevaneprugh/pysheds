@@ -1794,7 +1794,9 @@ class Grid(object):
         Computes the height above nearest drainage (HAND), based on a flow direction grid,
         a digital elevation grid, and a grid containing the locations of drainage channels.
         Also calculate distance and angle to nearest drainage (DTND, AZND).
- 
+        DTND and AZND use CRS-appropriate formulas (haversine for geographic,
+        Euclidean for projected/UTM).
+
         Parameters
         ----------
         fdir : str or Raster
@@ -2240,6 +2242,8 @@ class Grid(object):
                      inplace=True, apply_mask=False, ignore_metadata=False, **kwargs):
         """
         Computes the slope and aspect from a digital elevation grid.
+        The Horn 1981 stencil uses CRS-appropriate distance normalization
+        (haversine+cos(lat) for geographic, uniform pixel spacing for projected/UTM).
 
         Parameters
         ----------
@@ -3173,6 +3177,8 @@ class Grid(object):
                               apply_mask=True, ignore_metadata=False, **kwargs):
         """
         Estimate river network length and slope.  Assumes dem already instantiated.
+        Reach lengths use CRS-appropriate formulas (haversine for geographic,
+        Euclidean for projected/UTM).
 
         Parameters
         ----------

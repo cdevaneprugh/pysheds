@@ -471,6 +471,201 @@ class TestRiverNetworkLengthSlope:
         )
 
 
+class TestHandDtndRelationship:
+    """Cross-validate HAND and DTND using the V-valley's analytical geometry.
+
+    For the V-valley, every hillslope pixel drains straight E/W to the channel
+    column. The drainage pixel for pixel (r, c) is (r, channel_col), so:
+
+        HAND = cross_slope * |c - channel_col| * pixel_size
+        DTND = |c - channel_col| * pixel_size
+
+    Therefore: HAND = cross_slope * DTND for all hillslope pixels. This cross-
+    validates that HAND and DTND reference the same drainage pixel mapping
+    (hndx) and that the Euclidean distance formula is consistent with the
+    elevation-difference HAND values.
+    """
+
+    def test_hand_equals_cross_slope_times_dtnd(self, grid_with_hand, expectations):
+        """HAND / DTND should equal cross_slope on interior hillslope pixels."""
+        grid = grid_with_hand
+        cross_slope = expectations["cross_slope"]
+        channel_col = expectations["channel_col"]
+
+        hand = grid.hand
+        dtnd = grid.dtnd
+
+        margin = 5
+        edge = 5
+
+        # West side interior pixels
+        w_hand = hand[edge:-edge, edge : channel_col - margin]
+        w_dtnd = dtnd[edge:-edge, edge : channel_col - margin]
+
+        # East side interior pixels
+        e_hand = hand[edge:-edge, channel_col + margin + 1 : -edge]
+        e_dtnd = dtnd[edge:-edge, channel_col + margin + 1 : -edge]
+
+        # HAND should equal cross_slope * DTND
+        # Tolerance: cross_slope * pixel_size (one pixel worth of error)
+        tol = cross_slope * PIXEL_SIZE
+        np.testing.assert_allclose(
+            w_hand,
+            cross_slope * w_dtnd,
+            atol=tol,
+            err_msg="HAND != cross_slope * DTND on west side",
+        )
+        np.testing.assert_allclose(
+            e_hand,
+            cross_slope * e_dtnd,
+            atol=tol,
+            err_msg="HAND != cross_slope * DTND on east side",
+        )
+
+
+class TestHillslopeClassification:
+    """Test compute_hillslope bank classification on V-valley UTM DEM.
+
+    The V-valley has a clean geometry: west side = one bank, east side = the
+    other, center = channel. Although compute_hillslope is purely topological
+    (no CRS math), exercising it on UTM data provides coverage and validates
+    bank separation.
+    """
+
+    def test_hillslope_types_present(self, grid_with_hand):
+        """Hillslope classification should produce all 4 types."""
+        grid = grid_with_hand
+        grid.compute_hillslope("fdir", grid.channel_mask, grid.bank_mask, dirmap=DIRMAP)
+        hillslope = grid.hillslope
+        # Types: 1=headwater, 2=right_bank, 3=left_bank, 4=channel
+        present = set(np.unique(hillslope[hillslope > 0]))
+        assert present == {1, 2, 3, 4}, f"Expected types {{1,2,3,4}}, got {present}"
+
+    def test_bank_separation(self, grid_with_hand, expectations):
+        """West and east sides should have consistent but different bank types."""
+        grid = grid_with_hand
+        channel_col = expectations["channel_col"]
+
+        # compute_hillslope was already called in test above (same fixture scope)
+        hillslope = grid.hillslope
+
+        margin = 5
+        edge = 10  # wider edge to avoid headwater classification
+
+        west_types = hillslope[edge:-edge, edge : channel_col - margin]
+        east_types = hillslope[edge:-edge, channel_col + margin + 1 : -edge]
+
+        # Each side should be dominated by a single bank type (2 or 3)
+        west_mode = np.bincount(west_types.ravel()).argmax()
+        east_mode = np.bincount(east_types.ravel()).argmax()
+
+        assert west_mode in {2, 3}, f"West side mode={west_mode}, expected 2 or 3"
+        assert east_mode in {2, 3}, f"East side mode={east_mode}, expected 2 or 3"
+        assert west_mode != east_mode, (
+            f"West and east sides have same bank type ({west_mode})"
+        )
+
+    def test_channel_column_is_type_4(self, grid_with_hand, expectations):
+        """Channel column pixels should be classified as type 4."""
+        grid = grid_with_hand
+        channel_col = expectations["channel_col"]
+        hillslope = grid.hillslope
+        edge = 5
+
+        channel_types = hillslope[edge:-edge, channel_col]
+        assert np.all(channel_types == 4), (
+            f"Channel column should be type 4, got unique types: "
+            f"{np.unique(channel_types)}"
+        )
+
+
+class TestEndToEndUTM:
+    """End-to-end integration test: fresh Grid through full pipeline.
+
+    Chains from_raster -> flowdir -> accumulation -> create_channel_mask ->
+    compute_hand -> slope_aspect -> compute_hillslope on a fresh Grid to
+    catch state-passing bugs between stages that individual tests miss.
+    """
+
+    def test_full_pipeline(self, v_valley_path, expectations):
+        """Run the complete pipeline on a fresh Grid and validate all outputs."""
+        cross_slope = expectations["cross_slope"]
+        channel_col = expectations["channel_col"]
+        pixel_size = expectations["pixel_size"]
+        expected_slope = expectations["slope"]
+
+        # -- Load from raster (fresh Grid, no shared state) --
+        grid = Grid.from_raster(v_valley_path, "dem")
+        assert not grid._crs_is_geographic(), "Should detect UTM as non-geographic"
+
+        # -- Flow routing --
+        grid.flowdir("dem", out_name="fdir", dirmap=DIRMAP, routing="d8")
+        grid.accumulation("fdir", out_name="acc", dirmap=DIRMAP, routing="d8")
+
+        # -- Channel delineation --
+        acc_mask = grid.acc > NROWS
+        grid.create_channel_mask("fdir", mask=acc_mask, dirmap=DIRMAP)
+
+        # -- HAND/DTND/AZND --
+        grid.compute_hand(
+            "fdir",
+            "dem",
+            grid.channel_mask,
+            grid.channel_id,
+            dirmap=DIRMAP,
+            routing="d8",
+        )
+
+        margin = 5
+        edge = 5
+
+        # HAND should be positive and bounded
+        valid_hand = grid.hand[~np.isnan(grid.hand)]
+        assert np.all(valid_hand >= 0), "HAND has negative values"
+        max_expected_hand = cross_slope * (NCOLS / 2) * pixel_size
+        assert np.max(valid_hand) < max_expected_hand * 1.5, (
+            f"Max HAND={np.max(valid_hand):.1f}, expected < {max_expected_hand * 1.5:.1f}"
+        )
+
+        # DTND should be positive and bounded (not haversine garbage)
+        valid_dtnd = grid.dtnd[~np.isnan(grid.dtnd)]
+        assert np.max(valid_dtnd) < (NCOLS / 2) * pixel_size * 1.5, (
+            f"Max DTND={np.max(valid_dtnd):.1f}m — likely haversine-on-UTM bug"
+        )
+
+        # HAND = cross_slope * DTND on a sample row
+        sample_row = NROWS // 2
+        w_hand = grid.hand[sample_row, edge : channel_col - margin]
+        w_dtnd = grid.dtnd[sample_row, edge : channel_col - margin]
+        tol = cross_slope * pixel_size
+        np.testing.assert_allclose(
+            w_hand,
+            cross_slope * w_dtnd,
+            atol=tol,
+            err_msg="HAND != cross_slope * DTND on sample row",
+        )
+
+        # -- Slope/aspect --
+        grid.slope_aspect("dem")
+
+        west_slope = grid.slope[edge:-edge, edge : channel_col - 3]
+        assert west_slope == pytest.approx(expected_slope, abs=0.001), (
+            f"Slope mismatch: mean={np.mean(west_slope):.5f}, expected={expected_slope:.5f}"
+        )
+
+        west_aspect = grid.aspect[edge:-edge, edge : channel_col - 3]
+        assert west_aspect == pytest.approx(
+            expectations["aspect_west_side"], abs=0.5
+        ), f"West aspect mismatch: mean={np.mean(west_aspect):.2f}"
+
+        # -- Hillslope classification --
+        grid.compute_hillslope("fdir", grid.channel_mask, grid.bank_mask, dirmap=DIRMAP)
+        present = set(np.unique(grid.hillslope[grid.hillslope > 0]))
+        assert present == {1, 2, 3, 4}, (
+            f"Expected hillslope types {{1,2,3,4}}, got {present}"
+        )
+
+
 class TestGeographicRegression:
     """Verify that the UTM changes don't break geographic CRS behavior.
 
