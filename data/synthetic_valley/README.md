@@ -1,4 +1,20 @@
-# Synthetic V-Valley DEM for Phase A Testing
+# Synthetic DEMs for Phase A Testing
+
+## Overview
+
+Three synthetic DEMs with hardcoded geometry and closed-form analytical expectations. Each targets specific pysheds behaviors that the others cannot test.
+
+| DEM | Grid | Pixel | Tests |
+|-----|------|-------|-------|
+| V-Valley | 1000x1000 | 1m | UTM CRS: slope, aspect, HAND, DTND, haversine bug |
+| Split Valley | 200x1000 | 5m | Flow-path vs EDT DTND (multi-basin) |
+| Depression Basin | 200x200 | 5m | `fill_depressions()`, `resolve_flats()` |
+
+All use EPSG:32617 (UTM Zone 17N). The split valley and depression basin use 5m pixels to prevent silently passing tests that only work at unit spacing.
+
+---
+
+# V-Valley DEM
 
 ## Purpose
 
@@ -305,11 +321,208 @@ elev, expectations = generate_v_valley()
 assert expectations["aspect_west_side"] == pytest.approx(91.91, abs=0.01)
 ```
 
+---
+
+# Split Valley DEM
+
+## Purpose
+
+The V-valley has a structural limitation: every pixel's hydrologically nearest stream IS its geographically nearest stream. If `compute_hand()` were replaced with `scipy.ndimage.distance_transform_edt`, every V-valley DTND test would still pass. The split valley breaks this equivalence by creating a zone where EDT and flow-path DTND give different answers.
+
+## Geometry
+
+Two V-valleys side by side. Channel B sits 3.01m higher than Channel A, which pushes the drainage divide ~10 columns past the geometric midpoint. This creates a "divergence zone" where pixels are closer to Channel B (geographically) but drain to Channel A (hydrologically).
+
+### Plan view
+
+```
+        channel_A         midpoint   divide  channel_B
+           |                 |         |        |
+col:      200               450       460      700
+           |<-- basin A drains to A -->|<- B ->|
+           |                 |  divergence zone |
+           |                 |  EDT picks B     |
+           |                 |  flow picks A    |
+```
+
+### Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Grid | 200 x 1000 | Wide enough for two basins with margin |
+| Pixel size | 5m | Not 1m -- prevents silently passing unit-spacing tests |
+| Cross-slope | 0.03 m/m | Same as V-valley |
+| Downstream slope | 0.001 m/m | Same as V-valley |
+| Base elevation | 50.0 m | Same as V-valley |
+| Channel A | col 200 | Left channel |
+| Channel B | col 700 | Right channel, +3.01m offset |
+| EPSG | 32617 | UTM Zone 17N |
+
+### Elevation formula
+
+```python
+elev_A = 50.0 + 0.001*(199-r)*5 + 0.03*|c - 200|*5
+elev_B = 50.0 + 0.001*(199-r)*5 + 0.03*|c - 700|*5 + 3.01
+elev   = np.minimum(elev_A, elev_B)
+```
+
+The `np.minimum` creates a ridge where the two surfaces intersect.
+
+### Drainage divide
+
+The divide is at col ~460.03 (where `elev_A == elev_B`). Column 460 drains to A, column 461 drains to B. The geometric midpoint is at col 450.
+
+### Divergence zone
+
+Columns 451-460: geographically closer to Channel B, but hydrologically drain to Channel A.
+
+| Col | Flow-path DTND | EDT DTND | Difference |
+|-----|---------------|----------|------------|
+| 451 | 1255m (to A) | 1245m (to B) | 10m |
+| 455 | 1275m (to A) | 1225m (to B) | 50m |
+| 460 | 1300m (to A) | 1200m (to B) | 100m |
+
+### Analytical expectations
+
+- **Slope:** 0.030017 m/m (same as V-valley, uniform on each hillslope)
+- **HAND:** `cross_slope * |c - channel_col| * pixel_size` (channel_col depends on basin)
+- **DTND:** `|c - channel_col| * pixel_size` (flow-path: draining channel; EDT: nearest channel)
+- **Aspect:** ~92 deg (east-facing flanks), ~268 deg (west-facing flanks), four zones total
+
+### Bug detection
+
+| Bug | Detected? | How |
+|-----|-----------|-----|
+| EDT vs flow-path DTND | **Yes** | Divergence zone: flow DTND != EDT DTND (up to 100m difference) |
+| Haversine DTND on UTM | **Yes** | Same as V-valley |
+| Haversine gradient on UTM | **Yes** | Same as V-valley |
+
+### Usage
+
+```bash
+python data/synthetic_valley/generate_split_valley.py
+# Output: data/synthetic_valley/split_valley_utm.tif
+# Plots:  $SWENSON/output/plots/synthetic_dem_audit/split_valley_*.png
+```
+
+```python
+from data.synthetic_valley.generate_split_valley import generate_split_valley
+
+elev, expectations = generate_split_valley()
+assert expectations["divergence_start"] < expectations["divide_col_int"]
+```
+
+---
+
+# Depression Basin DEM
+
+## Purpose
+
+The V-valley and split valley have no flats or depressions -- they skip `fill_depressions()` and `resolve_flats()` entirely. The depression basin is the first synthetic DEM that requires the complete DEM conditioning chain: `fill_depressions -> resolve_flats -> flowdir`.
+
+## Geometry
+
+A north-to-south tilted plane with a parabolic bowl depression near the center.
+
+### Profile (N-S through depression center)
+
+```
+     N (high)
+     |
+     | ___________
+     |/           \_________ background
+     |  depression \
+     |    center    \
+     |_______________\_______ spill elevation
+     |                \_____
+     |
+     S (low)
+```
+
+### Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Grid | 200 x 200 | Small, focused on the depression |
+| Pixel size | 5m | Same as split valley |
+| Background slope | 0.01 m/m | Gentle N-to-S tilt |
+| Base elevation | 50.0 m | Southern edge |
+| Depression center | (100, 100) | Grid center |
+| Depression radius | 30 px (150m) | Large enough for meaningful flat region |
+| Depression depth | 3.0 m | Below spill elevation |
+| EPSG | 32617 | UTM Zone 17N |
+
+### Elevation formula
+
+```python
+background = 50.0 + 0.01 * (199 - r) * 5.0
+
+dist = sqrt((r - 100)^2 + (c - 100)^2)
+if dist < 30:
+    depth = 3.0 * (1.0 - (dist / 30)^2)
+    elev = background - depth
+else:
+    elev = background
+```
+
+### Key elevations
+
+| Location | Elevation |
+|----------|-----------|
+| Background at center (r=100) | 54.95m |
+| Depression center | 51.95m |
+| Spill point (r=130, c=92) | 53.45m |
+| North rim (r=70, c=100) | 56.45m |
+
+### After `fill_depressions()`
+
+All pixels inside the depression below 53.45m are raised to 53.45m. The filled region is a flat at the spill elevation -- this is exactly the input `resolve_flats()` needs.
+
+### After `resolve_flats()`
+
+The Garbrecht-Martz algorithm assigns micro-gradients across the flat. Flow directions route through the flat toward the spill point. No flat-coded pixels should remain.
+
+### After `flowdir` + `accumulation`
+
+- Every pixel has a valid D8 direction
+- The spill point has high accumulation (>= depression area)
+- HAND and DTND are finite and non-negative everywhere
+
+### Bug detection
+
+| Bug | Detected? | How |
+|-----|-----------|-----|
+| `fill_depressions` correctness | **Yes** | Fill level must equal spill elevation (53.45m) |
+| `resolve_flats` crash on zero-flat DEMs | N/A | This DEM has actual flats after filling |
+| `resolve_flats` routing correctness | **Yes** | Flow must route through flat to spill point |
+| D8 completeness after conditioning | **Yes** | No undefined flow directions |
+
+### Usage
+
+```bash
+python data/synthetic_valley/generate_depression_basin.py
+# Output: data/synthetic_valley/depression_basin_utm.tif
+# Plots:  $SWENSON/output/plots/synthetic_dem_audit/depression_basin_*.png
+```
+
+```python
+from data.synthetic_valley.generate_depression_basin import generate_depression_basin
+
+elev, expectations = generate_depression_basin()
+assert expectations["dep_center_elev"] < expectations["spill_elev"]
+```
+
+---
+
 ## Files
 
 | File | Role |
 |------|------|
-| `data/synthetic_valley/generate_synthetic_dem.py` | Generator script with CLI |
+| `data/synthetic_valley/generate_synthetic_dem.py` | V-valley generator (CLI, parameterized) |
+| `data/synthetic_valley/generate_split_valley.py` | Split valley generator (hardcoded) |
+| `data/synthetic_valley/generate_depression_basin.py` | Depression basin generator (hardcoded) |
 | `data/synthetic_valley/README.md` | This file |
-| `data/synthetic_valley/synthetic_valley_utm.tif` | Generated output |
+| `data/synthetic_valley/synthetic_valley_utm.tif` | V-valley output |
+| `data/synthetic_valley/split_valley_utm.tif` | Split valley output |
+| `data/synthetic_valley/depression_basin_utm.tif` | Depression basin output |
 | `data/dem.tif` | Existing geographic CRS test DEM |
