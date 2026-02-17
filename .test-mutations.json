@@ -1,0 +1,118 @@
+{
+  "version": "1.0",
+  "test_command": "cd /blue/gerber/cdevaneprugh/pysheds_fork && conda activate ctsm && export PYTHONPATH=\"/blue/gerber/cdevaneprugh/pysheds_fork:$PYTHONPATH\" && pytest tests/ -x -q",
+  "last_updated": "2026-02-17",
+  "modules": {
+    "pysheds/pgrid.py": {
+      "status": "completed",
+      "covering_tests": [
+        "tests/test_utm.py",
+        "tests/test_hillslope.py",
+        "tests/test_split_valley.py",
+        "tests/test_depression_basin.py"
+      ],
+      "target_methods": [
+        "_crs_is_geographic (129-147)",
+        "compute_hand (1789-2064)",
+        "compute_hillslope (2066-2264)",
+        "slope_aspect (2266-2338)",
+        "_gradient_horn_1981 (4205-4278)",
+        "create_channel_mask (3360-3477)",
+        "river_network_length_and_slope (3202-3348)",
+        "extract_profiles (3084-3200)"
+      ],
+      "last_tested": "2026-02-17",
+      "mutations_by_type": {
+        "crs_branch": {
+          "total": 8,
+          "killed": 8,
+          "survived": 0,
+          "examples": [
+            {"id": "M1", "line": 148, "desc": "_crs_is_geographic always True", "result": "killed"},
+            {"id": "M2", "line": 148, "desc": "_crs_is_geographic always False", "result": "killed"},
+            {"id": "M3", "line": 148, "desc": "_crs_is_geographic negated", "result": "killed"},
+            {"id": "M11", "line": 4241, "desc": "gradient Horn flip CRS", "result": "killed"},
+            {"id": "M25", "line": 3289, "desc": "river length flip CRS", "result": "killed"},
+            {"id": "M26", "line": 1985, "desc": "compute_hand DTND flip CRS", "result": "killed"},
+            {"id": "M27", "line": 2035, "desc": "compute_hand AZND flip CRS", "result": "killed"}
+          ]
+        },
+        "arithmetic": {
+          "total": 9,
+          "killed": 9,
+          "survived": 0,
+          "examples": [
+            {"id": "M4", "line": 2011, "desc": "DTND Euclidean + to -", "result": "killed (after adding test_dtnd_finite_where_hand_valid)"},
+            {"id": "M5", "line": 2011, "desc": "DTND remove sqrt", "result": "killed"},
+            {"id": "M13", "line": 4277, "desc": "gradient Horn 8 to 4 for dx", "result": "killed"},
+            {"id": "M14", "line": 4278, "desc": "gradient Horn 8 to 4 for dy", "result": "killed"},
+            {"id": "M16", "line": 2324, "desc": "slope remove sqrt", "result": "killed"},
+            {"id": "M20", "line": 1951, "desc": "HAND dem - to dem +", "result": "killed"},
+            {"id": "M21", "line": 1951, "desc": "HAND reverse subtraction", "result": "killed"},
+            {"id": "M24", "line": 3301, "desc": "river length + to -", "result": "killed"}
+          ]
+        },
+        "sign_negation": {
+          "total": 5,
+          "killed": 5,
+          "survived": 0,
+          "examples": [
+            {"id": "M7", "line": 2052, "desc": "AZND remove negations", "result": "killed"},
+            {"id": "M12", "line": 4260, "desc": "gradient Horn dx no abs", "result": "killed"},
+            {"id": "M18", "line": 2328, "desc": "aspect remove negations", "result": "killed"}
+          ]
+        },
+        "argument_swap": {
+          "total": 3,
+          "killed": 3,
+          "survived": 0,
+          "examples": [
+            {"id": "M8", "line": 2052, "desc": "AZND swap arctan2 args", "result": "killed"},
+            {"id": "M15", "line": 4272, "desc": "gradient Horn swap hax/hsx indices", "result": "killed"},
+            {"id": "M17", "line": 2328, "desc": "aspect swap arctan2 args", "result": "killed"},
+            {"id": "M28", "line": 4267, "desc": "gradient Horn mean_dx wrong indices", "result": "killed"}
+          ]
+        },
+        "constant": {
+          "total": 3,
+          "killed": 3,
+          "survived": 0,
+          "examples": [
+            {"id": "M9", "line": 2053, "desc": "AZND += 360 to += 180", "result": "killed"},
+            {"id": "M10", "line": 2053, "desc": "AZND remove += 360", "result": "killed"},
+            {"id": "M19", "line": 2331, "desc": "aspect += 360 to += 180", "result": "killed"}
+          ]
+        },
+        "relational": {
+          "total": 2,
+          "killed": 1,
+          "survived": 1,
+          "examples": [
+            {"id": "M6", "line": 2012, "desc": "DTND hndx != to ==", "result": "killed"},
+            {"id": "M29", "line": 2012, "desc": "DTND nodata 0 to 1", "result": "killed"},
+            {"id": "M23", "line": 2258, "desc": "hillslope channel type 4 to 0", "result": "killed"},
+            {"id": "M22", "line": 2254, "desc": "hillslope headwater type 1 to 2", "result": "killed"},
+            {"id": "M30", "line": 2255, "desc": "hillslope rbank > to >= (equivalent mutation)", "result": "survived"}
+          ]
+        }
+      },
+      "mutation_score": 96.7,
+      "insights": [
+        "M30 (rbank > 0 to >= 0) is an equivalent mutation: the only pixels with rbank==0 are lsource and cndx, which get overwritten by lbank=3 and cndx=4 in subsequent lines. No test can kill it.",
+        "M4 originally survived because all synthetic DEMs had pure E-W drainage (dlat=0). Added test_dtnd_finite_where_hand_valid to depression basin, which has N-S drainage (dlon=0, dlat!=0) — the mutation produces NaN from sqrt(negative).",
+        "All CRS branch flips (8 mutations) are killed — tests exercise both geographic and projected code paths.",
+        "All gradient formula mutations (Horn stencil indices, normalizer constants) are caught by slope/aspect value assertions on the V-valley DEM."
+      ]
+    }
+  },
+  "global_statistics": {
+    "total_modules": 1,
+    "completed_modules": 1,
+    "total_mutations": 30,
+    "total_killed": 29,
+    "total_survived": 1,
+    "overall_score": 96.7,
+    "equivalent_mutations": 1,
+    "effective_score": 100.0
+  }
+}

@@ -410,3 +410,25 @@ class TestDTND:
             f"Max DTND = {np.max(valid):.1f}m, "
             f"exceeds domain diagonal {domain_diagonal:.1f}m"
         )
+
+    def test_dtnd_finite_where_hand_valid(self, grid_with_hand):
+        """DTND should be finite for all pixels with a valid drainage path.
+
+        On the background slope, every pixel drains south to the channel row.
+        This creates dlon=0 with dlat!=0 in the Euclidean DTND formula.
+        If the formula has a sign error (e.g. dlon^2 - dlat^2 instead of +),
+        sqrt of a negative produces NaN — which the bound-checking tests miss
+        because they filter NaN before asserting.
+        """
+        dtnd = grid_with_hand.dtnd
+        hand = grid_with_hand.hand
+
+        # Pixels with valid HAND (not NaN) have a drainage path via hndx,
+        # so their DTND must also be finite.
+        has_valid_hand = ~np.isnan(hand)
+        has_nan_dtnd = np.isnan(dtnd)
+        invalid = has_valid_hand & has_nan_dtnd
+        assert not np.any(invalid), (
+            f"{np.sum(invalid)} pixels have valid HAND but NaN DTND — "
+            f"Euclidean distance formula may have a sign error"
+        )
