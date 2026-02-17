@@ -296,12 +296,6 @@ class TestHAND:
                 err_msg=f"HAND mismatch on east side, row {r}",
             )
 
-    def test_hand_non_negative(self, grid_with_hand):
-        """HAND should be non-negative everywhere."""
-        hand = grid_with_hand.hand
-        valid = hand[~np.isnan(hand)]
-        assert np.all(valid >= 0)
-
 
 class TestDTND:
     """Test DTND computation on V-valley UTM DEM."""
@@ -366,22 +360,6 @@ class TestDTND:
         assert np.all(channel_dtnd == 0), (
             f"Channel DTND should be 0, got range "
             f"[{channel_dtnd.min():.2f}, {channel_dtnd.max():.2f}]"
-        )
-
-    def test_dtnd_not_haversine_garbage(self, grid_with_hand, expectations):
-        """DTND at ridges should be ~500m, not haversine-on-meters garbage.
-
-        Haversine interpreting UTM meters as degrees would produce values
-        on the order of millions of meters (6371km * radians). This test
-        catches that failure mode with a generous upper bound.
-        """
-        dtnd = grid_with_hand.dtnd
-        max_dtnd = expectations["dtnd_max"]
-
-        valid = dtnd[~np.isnan(dtnd)]
-        assert np.max(valid) < max_dtnd * 2, (
-            f"Max DTND = {np.max(valid):.1f}m, expected ~{max_dtnd:.1f}m. "
-            f"Likely haversine-on-UTM bug."
         )
 
 
@@ -461,14 +439,6 @@ class TestRiverNetworkLengthSlope:
         """Mean reach slope should be ~0.001 m/m."""
         result = grid_with_river_stats
         assert result["slope"] == pytest.approx(DOWNSTREAM_SLOPE, rel=0.1)
-
-    def test_length_not_haversine_garbage(self, grid_with_river_stats):
-        """Length should be < 2km, not ~110,000 km from haversine."""
-        result = grid_with_river_stats
-        assert result["length"] < 2000, (
-            f"Total length = {result['length']:.0f}m. "
-            f"Expected ~995m, not haversine garbage."
-        )
 
 
 class TestHandDtndRelationship:

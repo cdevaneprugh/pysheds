@@ -53,16 +53,6 @@ def processed_grid(grid_with_dem):
 class TestSlopeAspect:
     """Tests for slope_aspect() method."""
 
-    def test_slope_aspect_runs(self, grid_with_dem):
-        """Test that slope_aspect runs without error."""
-        grid = grid_with_dem
-        # inplace=True by default, stores in grid.slope and grid.aspect
-        grid.slope_aspect("dem")
-        assert hasattr(grid, "slope")
-        assert hasattr(grid, "aspect")
-        assert grid.slope is not None
-        assert grid.aspect is not None
-
     def test_slope_aspect_output_shape(self, grid_with_dem):
         """Test that slope_aspect outputs have correct shape."""
         grid = grid_with_dem
@@ -95,25 +85,6 @@ class TestSlopeAspect:
 class TestChannelMask:
     """Tests for create_channel_mask() method."""
 
-    def test_create_channel_mask_runs(self, processed_grid):
-        """Test that create_channel_mask runs without error."""
-        grid = processed_grid
-
-        # Create accumulation mask (e.g., > 100 cells)
-        acc = grid.acc
-        acc_threshold = 100
-        acc_mask = acc > acc_threshold
-
-        # inplace=True by default, stores in grid.channel_mask, grid.channel_id, grid.bank_mask
-        grid.create_channel_mask("fdir", mask=acc_mask, dirmap=DIRMAP)
-
-        assert hasattr(grid, "channel_mask")
-        assert hasattr(grid, "channel_id")
-        assert hasattr(grid, "bank_mask")
-        assert grid.channel_mask is not None
-        assert grid.channel_id is not None
-        assert grid.bank_mask is not None
-
     def test_channel_mask_is_binary(self, processed_grid):
         """Test that channel_mask is binary (0 or 1)."""
         grid = processed_grid
@@ -145,28 +116,6 @@ class TestChannelMask:
 class TestComputeHand:
     """Tests for compute_hand() method (extended version)."""
 
-    def test_compute_hand_runs(self, processed_grid):
-        """Test that compute_hand runs and produces all outputs."""
-        grid = processed_grid
-
-        acc = grid.acc
-        acc_mask = acc > 100
-
-        grid.create_channel_mask("fdir", mask=acc_mask, dirmap=DIRMAP)
-
-        # compute_hand also uses inplace=True by default
-        grid.compute_hand(
-            "fdir",
-            "dem",
-            grid.channel_mask,
-            grid.channel_id,
-            dirmap=DIRMAP,
-            routing="d8",
-        )
-
-        assert hasattr(grid, "hand")
-        assert grid.hand is not None
-
     def test_hand_non_negative(self, processed_grid):
         """Test that HAND values are non-negative."""
         grid = processed_grid
@@ -191,21 +140,6 @@ class TestComputeHand:
 
 class TestComputeHillslope:
     """Tests for compute_hillslope() method."""
-
-    def test_compute_hillslope_runs(self, processed_grid):
-        """Test that compute_hillslope runs without error."""
-        grid = processed_grid
-
-        acc = grid.acc
-        acc_mask = acc > 100
-
-        grid.create_channel_mask("fdir", mask=acc_mask, dirmap=DIRMAP)
-
-        # compute_hillslope also uses inplace=True by default
-        grid.compute_hillslope("fdir", grid.channel_mask, grid.bank_mask)
-
-        assert hasattr(grid, "hillslope")
-        assert grid.hillslope is not None
 
     def test_hillslope_valid_values(self, processed_grid):
         """Test that hillslope classification has valid values."""
@@ -246,8 +180,12 @@ class TestExtractProfiles:
         assert isinstance(profiles, list)
         assert isinstance(connections, dict)
 
-    def test_profiles_have_structure(self, processed_grid):
-        """Test that profiles have expected structure."""
+    def test_profiles_are_channel_pixels(self, processed_grid):
+        """Test that profile indices correspond to channel pixels.
+
+        Each profile should contain only flat indices that fall on pixels
+        where accumulation exceeds the threshold (i.e., actual channel pixels).
+        """
         grid = processed_grid
 
         acc = grid.acc
@@ -257,12 +195,33 @@ class TestExtractProfiles:
             "fdir", mask=acc_mask, dirmap=DIRMAP
         )
 
-        # Should have at least one profile
         assert len(profiles) > 0
 
-        # Each profile should be an array of indices
+        # Flatten the acc_mask to match flat index format
+        acc_mask_flat = np.asarray(acc_mask).ravel()
+
+        total_profile_pixels = 0
+        on_channel_count = 0
         for profile in profiles:
-            assert isinstance(profile, np.ndarray)
+            assert len(profile) >= 1, "Empty profile array"
+            on_channel_count += np.sum(acc_mask_flat[profile])
+            total_profile_pixels += len(profile)
+
+        # Nearly all profile pixels should be on the channel network.
+        # Endpoint/junction pixels may fall just below the threshold.
+        on_channel_frac = on_channel_count / total_profile_pixels
+        assert on_channel_frac > 0.9, (
+            f"Only {on_channel_frac:.1%} of profile pixels are on the channel "
+            f"network ({on_channel_count}/{total_profile_pixels})"
+        )
+
+        # Profiles should cover a meaningful fraction of channel pixels
+        total_channel_pixels = np.sum(acc_mask_flat)
+        coverage = total_profile_pixels / total_channel_pixels
+        assert coverage > 0.5, (
+            f"Profiles cover only {coverage:.1%} of channel pixels "
+            f"({total_profile_pixels}/{total_channel_pixels})"
+        )
 
 
 class TestRiverNetworkLengthSlope:
@@ -277,9 +236,7 @@ class TestRiverNetworkLengthSlope:
 
         # Method signature: river_network_length_and_slope(fdir, mask, dirmap=None, ...)
         # Returns a dictionary with keys: length, slope, mch_length, mch_slope, etc.
-        result = grid.river_network_length_and_slope(
-            "fdir", acc_mask, dirmap=DIRMAP
-        )
+        result = grid.river_network_length_and_slope("fdir", acc_mask, dirmap=DIRMAP)
 
         assert isinstance(result, dict)
         assert "length" in result
@@ -289,36 +246,30 @@ class TestRiverNetworkLengthSlope:
 
 
 class TestIntegration:
-    """Integration tests for full hillslope workflow."""
+    """Integration test: full pipeline chains without state-passing bugs."""
 
     def test_full_workflow(self, processed_grid):
-        """Test full hillslope analysis workflow."""
+        """Run complete pipeline and verify hillslope classification output.
+
+        Individual methods are tested by their own classes. This test verifies
+        that the full chain produces a valid hillslope classification with all
+        expected types present — catching state-passing bugs between stages.
+        """
         grid = processed_grid
 
-        # Step 1: Calculate slope and aspect
         grid.slope_aspect("dem")
-        assert grid.slope is not None
-        assert grid.aspect is not None
 
-        # Step 2: Create channel network
-        acc = grid.acc
-        acc_mask = acc > 100
-
+        acc_mask = grid.acc > 100
         grid.create_channel_mask("fdir", mask=acc_mask, dirmap=DIRMAP)
-        assert grid.channel_mask is not None
-
-        # Step 3: Calculate HAND
         grid.compute_hand(
             "fdir", "dem", grid.channel_mask, grid.channel_id, dirmap=DIRMAP
         )
-        assert grid.hand is not None
-
-        # Step 4: Classify hillslopes
         grid.compute_hillslope("fdir", grid.channel_mask, grid.bank_mask)
-        assert grid.hillslope is not None
 
-        # Verify we have all 4 hillslope types
         valid_hs = grid.hillslope[~np.isnan(grid.hillslope)]
-        unique_types = np.unique(valid_hs)
-        # We should have at least channel (4) and some bank types
-        assert 4 in unique_types  # Channel should exist
+        unique_types = set(np.unique(valid_hs))
+        # Should have channel (4) and at least one bank/headwater type
+        assert 4 in unique_types, f"Channel type (4) missing from {unique_types}"
+        assert len(unique_types) >= 3, (
+            f"Expected at least 3 hillslope types, got {unique_types}"
+        )
