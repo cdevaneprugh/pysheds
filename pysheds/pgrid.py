@@ -1971,6 +1971,14 @@ class Grid(object):
                     # TO current pixel (i.e. current - drainage). The sign doesn't
                     # matter for distance (we square them), but it does matter for
                     # AZND below.
+                    #
+                    # Naming context: lon2d/lat2d come from _2d_geographic_coordinates(),
+                    # which returns CRS coordinates at pixel centers regardless of CRS
+                    # type. For geographic CRS, dlon/dlat are degree offsets; for
+                    # projected CRS (e.g. UTM), they are meter offsets (easting/northing
+                    # differences). The variable names are retained for compatibility
+                    # with callers throughout pgrid — the if/else below handles the
+                    # unit difference.
                     dlon = lon2d-lon2d.flat[hndx]
                     dlat = lat2d-lat2d.flat[hndx]
 
@@ -1991,6 +1999,15 @@ class Grid(object):
                         # linear units (meters for UTM). Euclidean distance is
                         # exact on the projected plane. UTM distortion is < 0.04%
                         # within a single zone, so the error is negligible.
+                        #
+                        # This branch replaces the EDT workaround that the OSBS
+                        # pipeline (run_pipeline.py) used before Phase A. That
+                        # workaround used scipy.ndimage.distance_transform_edt,
+                        # which computed correct Euclidean distances but to the
+                        # geographically nearest channel pixel — not the
+                        # hydrologically linked one via D8 routing. Here we get
+                        # both right: hydrological linkage from hndx (D8 trace)
+                        # and correct Euclidean distance on the projected plane.
                         dtnd = np.sqrt(dlon**2 + dlat**2)
                     dtnd = np.where(hndx != -1, dtnd, 0)
 
@@ -2011,6 +2028,10 @@ class Grid(object):
                     #
                     # arctan2(x, y) with x = east component, y = north component
                     # gives clockwise-from-north azimuth (geographic convention).
+                    #
+                    # dlon/dlat were computed in the DTND section above. They contain
+                    # degree offsets for geographic CRS or meter offsets for projected
+                    # CRS — the if/else branches handle this unit difference.
                     if self._crs_is_geographic():
                         # Spherical bearing formula. The sin(-dlon) and cos(-dlon)
                         # terms negate dlon for the same reason: reversing the
@@ -2023,6 +2044,11 @@ class Grid(object):
                         # Negate dlon/dlat to reverse from "drainage→pixel" to
                         # "pixel→drainage". arctan2(-dlon, -dlat) gives the
                         # clockwise-from-north bearing in radians.
+                        #
+                        # On a projected plane, bearing is simply the angle of
+                        # the displacement vector — no spherical trig or meridian
+                        # convergence correction needed. The grid is Cartesian
+                        # with easting (x) and northing (y) axes.
                         aznd = np.degrees(np.arctan2(-dlon, -dlat))
                     aznd[aznd < 0] += 360
 
@@ -3253,6 +3279,10 @@ class Grid(object):
             plon = np.asarray((fdir.affine * (xi, yi))[0])
             plat = np.asarray((fdir.affine * (xi, yi))[1])
             plon,plat = plon[pmask],plat[pmask]
+            # Consecutive coordinate differences along the stream reach.
+            # Names follow the lon/lat convention from _2d_geographic_coordinates();
+            # for projected CRS (e.g. UTM) these are meter offsets (easting/northing
+            # differences). The if/else below handles the unit difference.
             dlon = plon[:-1] - plon[1:]
             dlat = plat[:-1] - plat[1:]
 
@@ -4189,10 +4219,17 @@ class Grid(object):
         # _2d_geographic_coordinates() returns CRS coordinates at pixel centers:
         #   - Geographic CRS → lon/lat in degrees
         #   - Projected CRS (e.g. UTM) → easting/northing in meters
-        # (The method name is misleading for projected CRS; see its docstring.)
+        # The method name is misleading for projected CRS (see its docstring).
+        # Variable names lon2d/lat2d are retained for compatibility with the
+        # rest of pgrid — _2d_geographic_coordinates() is the common source of
+        # coordinate arrays for compute_hand(), river_network_length_and_slope(),
+        # and this function. For projected CRS, lon2d contains easting (meters)
+        # and lat2d contains northing (meters).
         #
         # dlon[k, i] and dlat[k, i] are the coordinate offsets from pixel i
         # to its k-th neighbor (k in [N, NE, E, SE, S, SW, W, NW]).
+        # For geographic CRS these are degree offsets; for projected CRS
+        # these are meter offsets.
         lon2d, lat2d = self._2d_geographic_coordinates()
         dlon = np.subtract(lon2d.flat[inner_neighbors], lon2d.flat[inside])
         dlat = np.subtract(lat2d.flat[inner_neighbors], lat2d.flat[inside])
@@ -4213,7 +4250,13 @@ class Grid(object):
             # Projected CRS (e.g. UTM): the affine transform maps pixel indices
             # directly to CRS coordinates in linear units (meters for UTM).
             # Coordinate differences are already physical distances — no
-            # conversion needed. UTM distortion is < 0.04% within a zone.
+            # conversion needed, just take abs() for spacing magnitude.
+            # UTM distortion is < 0.04% within a zone.
+            #
+            # If the geographic branch's formula (re * dtr * cos(lat) * dlon)
+            # were applied to UTM coordinates, it would interpret easting
+            # values (e.g. 400000m) as degrees and produce nonsensical
+            # distances scaled by Earth's radius.
             dx = np.abs(dlon)
             dy = np.abs(dlat)
 
