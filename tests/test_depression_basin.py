@@ -415,8 +415,8 @@ class TestDTND:
         """DTND should be finite for all pixels with a valid drainage path.
 
         On the background slope, every pixel drains south to the channel row.
-        This creates dlon=0 with dlat!=0 in the Euclidean DTND formula.
-        If the formula has a sign error (e.g. dlon^2 - dlat^2 instead of +),
+        This creates dx=0 with dy!=0 in the Euclidean DTND formula.
+        If the formula has a sign error (e.g. dx^2 - dy^2 instead of +),
         sqrt of a negative produces NaN — which the bound-checking tests miss
         because they filter NaN before asserting.
         """

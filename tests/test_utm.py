@@ -342,7 +342,7 @@ class TestDTND:
         """DTND at channel pixels should be zero.
 
         CRS-independent: channel pixels have hndx pointing to themselves
-        (pgrid.py:1935), so dlon=dlat=0 -> distance=0 for both haversine
+        (pgrid.py:1935), so dx=dy=0 -> distance=0 for both haversine
         and Euclidean.
         """
         grid = grid_with_hand
@@ -401,7 +401,7 @@ class TestAZND:
         """Channel pixels have hndx pointing to themselves -> AZND = 180 deg.
 
         This is a topology test, NOT a CRS test. Channel pixels' hndx maps
-        to self (pgrid.py:1935), so dlon=dlat=0 regardless of CRS. The 180
+        to self (pgrid.py:1935), so dx=dy=0 regardless of CRS. The 180
         degree value comes from arctan2(-0.0, -0.0) = -pi (IEEE 754 signed
         zero). Verifies hndx assignment, not distance computation.
         """
