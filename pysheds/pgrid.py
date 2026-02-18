@@ -1766,14 +1766,12 @@ class Grid(object):
         return self._output_handler(data=dist, out_name=out_name, properties=properties,
                                     inplace=inplace, metadata=metadata)
 
-    def _2d_geographic_coordinates(self):
+    def _2d_crs_coordinates(self):
         """Return 2D coordinate arrays in the grid's CRS.
 
-        Despite the name, this method returns coordinates in whatever CRS
-        the grid uses — NOT necessarily geographic coordinates. For geographic
-        CRS these are lon/lat in degrees; for projected CRS (e.g. UTM) these
-        are easting/northing in meters. The variable names lon2d/lat2d are
-        retained for compatibility with existing callers.
+        For geographic CRS these are lon/lat in degrees; for projected CRS
+        (e.g. UTM) these are easting/northing in meters. The variable names
+        lon2d/lat2d are retained for compatibility with existing callers.
 
         The affine transform maps pixel indices (col, row) to CRS coordinates.
         The 0.5*dx / 0.5*dy offset shifts from pixel corner to pixel center.
@@ -1873,7 +1871,7 @@ class Grid(object):
                                    **kwargs)
 
         # add geographic coordinates for dtnd calculation
-        lon2d, lat2d = self._2d_geographic_coordinates()
+        lon2d, lat2d = self._2d_crs_coordinates()
 
         assert (np.asarray(dem.shape) == np.asarray(fdir.shape)).all()
         assert (np.asarray(dem.shape) == np.asarray(mask.shape)).all()
@@ -1977,7 +1975,7 @@ class Grid(object):
                     # matter for distance (we square them), but it does matter for
                     # AZND below.
                     #
-                    # Naming context: lon2d/lat2d come from _2d_geographic_coordinates(),
+                    # Naming context: lon2d/lat2d come from _2d_crs_coordinates(),
                     # which returns CRS coordinates at pixel centers regardless of CRS
                     # type. For geographic CRS, dlon/dlat are degree offsets; for
                     # projected CRS (e.g. UTM), they are meter offsets (easting/northing
@@ -3265,7 +3263,7 @@ class Grid(object):
             plat = np.asarray((fdir.affine * (xi, yi))[1])
             plon,plat = plon[pmask],plat[pmask]
             # Consecutive coordinate differences along the stream reach.
-            # Names follow the lon/lat convention from _2d_geographic_coordinates();
+            # Names follow the lon/lat convention from _2d_crs_coordinates();
             # for projected CRS (e.g. UTM) these are meter offsets (easting/northing
             # differences). The if/else below handles the unit difference.
             dlon = plon[:-1] - plon[1:]
@@ -4199,12 +4197,11 @@ class Grid(object):
 
         # --- Convert pixel-index differences to physical distances ---
         #
-        # _2d_geographic_coordinates() returns CRS coordinates at pixel centers:
+        # _2d_crs_coordinates() returns CRS coordinates at pixel centers:
         #   - Geographic CRS → lon/lat in degrees
         #   - Projected CRS (e.g. UTM) → easting/northing in meters
-        # The method name is misleading for projected CRS (see its docstring).
         # Variable names lon2d/lat2d are retained for compatibility with the
-        # rest of pgrid — _2d_geographic_coordinates() is the common source of
+        # rest of pgrid — _2d_crs_coordinates() is the common source of
         # coordinate arrays for compute_hand(), river_network_length_and_slope(),
         # and this function. For projected CRS, lon2d contains easting (meters)
         # and lat2d contains northing (meters).
@@ -4213,7 +4210,7 @@ class Grid(object):
         # to its k-th neighbor (k in [N, NE, E, SE, S, SW, W, NW]).
         # For geographic CRS these are degree offsets; for projected CRS
         # these are meter offsets.
-        lon2d, lat2d = self._2d_geographic_coordinates()
+        lon2d, lat2d = self._2d_crs_coordinates()
         dlon = np.subtract(lon2d.flat[inner_neighbors], lon2d.flat[inside])
         dlat = np.subtract(lat2d.flat[inner_neighbors], lat2d.flat[inside])
 
