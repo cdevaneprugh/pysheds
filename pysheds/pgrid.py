@@ -39,6 +39,13 @@ from pysheds.pview import Raster
 from pysheds.pview import BaseViewFinder, RegularViewFinder, IrregularViewFinder
 from pysheds.pview import RegularGridViewer, IrregularGridViewer
 
+# --- Physical and mathematical constants ---
+# Used by haversine distance, great-circle bearing, and Horn 1981 gradient
+# calculations in the geographic CRS branches of compute_hand(),
+# river_network_length_and_slope(), and _gradient_horn_1981().
+_EARTH_RADIUS_M = 6.371e6    # Mean Earth radius (meters)
+_DEG_TO_RAD = np.pi / 180    # Degrees-to-radians conversion factor
+
 
 def _signed_mintype(size):
     """Get minimum signed integer type that can hold values up to 'size' plus negative offsets."""
@@ -1916,8 +1923,6 @@ class Grid(object):
                 hand = hand.reshape(dem.shape)
                 if not return_index:
                     hand = np.where(hand != -1, dem - dem.flat[hand], nodata_out)
-            except:
-                raise
             finally:
                 mask = mask.reshape(dem.shape)
                 self._replace_rim(fdir_0, dirleft_0, dirright_0, dirtop_0, dirbottom_0)
@@ -1988,12 +1993,10 @@ class Grid(object):
                         # distance on the sphere. Feeding UTM meter values into
                         # this formula produces garbage (it interprets e.g.
                         # 400000m as 400000 degrees).
-                        dtr = np.pi/180
-                        re = 6.371e6  # Earth radius in meters
-                        dtnd = np.power(np.sin(dtr*dlat/2),2) + np.cos(dtr*lat2d) * np.cos(dtr*lat2d.flat[hndx]) * np.power(np.sin(dtr*dlon/2),2)
+                        dtnd = np.power(np.sin(_DEG_TO_RAD*dlat/2),2) + np.cos(_DEG_TO_RAD*lat2d) * np.cos(_DEG_TO_RAD*lat2d.flat[hndx]) * np.power(np.sin(_DEG_TO_RAD*dlon/2),2)
                         dtnd[dtnd > 1] = 1
                         dtnd[dtnd < 0] = 0
-                        dtnd = (re * 2 * np.arctan2( np.sqrt(dtnd), np.sqrt(1-dtnd)))
+                        dtnd = (_EARTH_RADIUS_M * 2 * np.arctan2( np.sqrt(dtnd), np.sqrt(1-dtnd)))
                     else:
                         # Projected CRS (e.g. UTM): coordinates are already in
                         # linear units (meters for UTM). Euclidean distance is
@@ -2036,9 +2039,8 @@ class Grid(object):
                         # Spherical bearing formula. The sin(-dlon) and cos(-dlon)
                         # terms negate dlon for the same reason: reversing the
                         # vector from "drainage→pixel" to "pixel→drainage".
-                        dtr = np.pi/180
-                        aznd = np.arctan2(np.sin(-dtr*dlon),(np.cos(dtr*lat2d)*np.tan(dtr*lat2d.flat[hndx]) - np.sin(dtr*lat2d)*np.cos(-dtr*dlon)))
-                        aznd = aznd/dtr
+                        aznd = np.arctan2(np.sin(-_DEG_TO_RAD*dlon),(np.cos(_DEG_TO_RAD*lat2d)*np.tan(_DEG_TO_RAD*lat2d.flat[hndx]) - np.sin(_DEG_TO_RAD*lat2d)*np.cos(-_DEG_TO_RAD*dlon)))
+                        aznd = aznd/_DEG_TO_RAD
                     else:
                         # Projected CRS: planar azimuth on the projected plane.
                         # Negate dlon/dlat to reverse from "drainage→pixel" to
@@ -2054,14 +2056,65 @@ class Grid(object):
 
                     self._output_handler(data=aznd, out_name='aznd', properties=properties,inplace=inplace, metadata=metadata)
 
-            except:
-                raise
             finally:
                 mask = mask.reshape(dem.shape)
                 self._replace_rim(fdir, dirleft, dirright, dirtop, dirbottom)
                 self._replace_rim(mask, maskleft, maskright, masktop, maskbottom)
             return self._output_handler(data=hand, out_name=out_name, properties=properties,
                                         inplace=inplace, metadata=metadata)
+
+    def _propagate_uphill(self, fdir, source, bank, r_dirmap):
+        """Propagate bank classification uphill from source pixels via D8 flow.
+
+        Starting from `source` pixels, iteratively finds all 8-connected
+        neighbors whose flow direction points back to a source pixel (i.e.,
+        neighbors that drain into the current wavefront). Marks those
+        neighbors in the `bank` array and advances the wavefront uphill.
+        Repeats until no new upstream pixels are found.
+
+        This is a breadth-first flood fill constrained by the D8 flow
+        direction field — only pixels that actually drain toward the
+        current wavefront are claimed.
+
+        Parameters
+        ----------
+        fdir : np.ndarray
+            D8 flow direction grid (flattened during neighbor lookup).
+        source : np.ndarray
+            1D array of flat indices for the initial wavefront pixels.
+        bank : np.ndarray
+            2D classification array. Pixels not yet assigned have value < 0
+            (initialized to -1). Claimed pixels are set to 1 in-place.
+        r_dirmap : np.ndarray
+            Reverse direction map — r_dirmap[k] is the D8 code meaning
+            "flows toward neighbor k". Used to test whether a neighbor
+            drains into the current source pixel.
+
+        Notes
+        -----
+        Modifies `bank` in-place. The loop is bounded by `fdir.size`
+        (worst case: every pixel is visited once), but typically terminates
+        much earlier when the wavefront reaches ridge pixels with no
+        further upstream contributors.
+        """
+        for _ in range(fdir.size):
+            # For each pixel in the current wavefront, find its 8 neighbors
+            selection = self._select_surround_ravel(source, fdir.shape)
+
+            # Clamp neighbor indices to valid grid range
+            selection[selection > (fdir.size - 1)] = fdir.size - 1
+            selection[selection < 0] = 0
+
+            # Keep neighbors that (a) flow toward a wavefront pixel and
+            # (b) have not yet been assigned to any bank
+            ix = (fdir.flat[selection] == r_dirmap) & (bank.flat[selection] < 0)
+            child = selection[ix]
+            if not child.size:
+                break
+
+            # Mark upstream pixels and advance the wavefront
+            bank.flat[child] = 1
+            source = child
 
     def compute_hillslope(self, fdir, channel_mask, bank_mask, out_name='hillslope', dirmap=None,
                      nodata_in_fdir=None, nodata_in_mask=None, nodata_out=np.nan, routing='d8',
@@ -2169,72 +2222,11 @@ class Grid(object):
                 hbank.flat[rsource] = 1 # zero later
                 hbank.flat[lsource] = 1 # zero later
 
-                # right bank search
-                for _ in range(fdir.size):
-                    # for each gridcell in source, identify 8 neighbors
-                    selection = self._select_surround_ravel(rsource, fdir.shape)
-
-                    # ensure selection within grid
-                    selection[selection > (fdir.size-1)] = fdir.size-1
-                    selection[selection < 0] = 0
-
-                    # if fdir matches r_dirmap, it means that
-                    # neighbor flows to the source gridcell
-                    # also, only select cells that have not been identified
-                    ix = (fdir.flat[selection] == r_dirmap) & (rbank.flat[selection] < 0)
-                    child = selection[ix]
-                    if not child.size:
-                        break
-                    # assign the upstream cell
-                    rbank.flat[child] = 1
-                    # reset source to these upstream cells and repeat until
-                    # no upstream cells found
-                    rsource = child
-
-                # left bank search
-                for _ in range(fdir.size):
-                    # for each gridcell in source, identify 8 neighbors
-                    selection = self._select_surround_ravel(lsource, fdir.shape)
-
-                    # ensure selection within grid
-                    selection[selection > (fdir.size-1)] = fdir.size-1
-                    selection[selection < 0] = 0
-
-                    # if fdir matches r_dirmap, it means that
-                    # neighbor flows to the source gridcell
-                    # also, only select cells that have not been identified
-                    ix = (fdir.flat[selection] == r_dirmap) & (lbank.flat[selection] < 0)
-                    child = selection[ix]
-                    if not child.size:
-                        break
-                    # assign the upstream cell
-                    lbank.flat[child] = 1
-                    # reset source to these upstream cells and repeat until
-                    # no upstream cells found
-                    lsource = child
-
-                # headwaters search
-                for _ in range(fdir.size):
-                    # for each gridcell in source, identify 8 neighbors
-                    selection = self._select_surround_ravel(hsource, fdir.shape)
-
-                    # ensure selection within grid
-                    selection[selection > (fdir.size-1)] = fdir.size-1
-                    selection[selection < 0] = 0
-
-                    # if fdir matches r_dirmap, it means that
-                    # neighbor flows to the source gridcell
-                    # also, only select cells that have not been identified
-                    ix = (fdir.flat[selection] == r_dirmap) & (hbank.flat[selection] < 0)
-                    # TODO: Not optimized (a lot of copying here)
-                    child = selection[ix]
-                    if not child.size:
-                        break
-                    # assign the upstream cell
-                    hbank.flat[child] = 1
-                    # reset source to these upstream cells and repeat until
-                    # no upstream cells found
-                    hsource = child
+                # Propagate bank classification uphill from seed pixels.
+                # Each call flood-fills one bank's watershed via D8 tracing.
+                self._propagate_uphill(fdir, rsource, rbank, r_dirmap)  # right bank
+                self._propagate_uphill(fdir, lsource, lbank, r_dirmap)  # left bank
+                self._propagate_uphill(fdir, hsource, hbank, r_dirmap)  # headwaters
 
                 # original source cells
                 rsource = np.flatnonzero(bank_mask*(bank_mask > 0))
@@ -2257,8 +2249,6 @@ class Grid(object):
                 # reset channel after hillslopes
                 hillslope.flat[cndx] = 4
                 hillslope = hillslope.astype(int)
-            except:
-                raise
             finally:
                 self._replace_rim(fdir, dirleft, dirright, dirtop, dirbottom)
             return self._output_handler(data=hillslope, out_name=out_name, properties=properties, inplace=inplace, metadata=metadata)
@@ -2303,39 +2293,34 @@ class Grid(object):
                                   properties=properties, ignore_metadata=ignore_metadata,
                                   **kwargs)
 
-        try:
-            if nodata_in_dem is None:
-                dem_mask = np.array([]).astype(int)
+        if nodata_in_dem is None:
+            dem_mask = np.array([]).astype(int)
+        else:
+            if np.isnan(nodata_in_dem):
+                dem_mask = np.where(np.isnan(dem.ravel()))[0]
             else:
-                if np.isnan(nodata_in_dem):
-                    dem_mask = np.where(np.isnan(dem.ravel()))[0]
-                else:
-                    dem_mask = np.where(dem.ravel() == nodata_in_dem)[0]
-            # Make sure nothing flows to the nodata cells
-            dem.flat[dem_mask] = dem.max() + 1
-            inside = self._inside_indices(dem, mask=dem_mask)
-            grad = self._gradient_horn_1981(dem, inside)
+                dem_mask = np.where(dem.ravel() == nodata_in_dem)[0]
+        # Make sure nothing flows to the nodata cells
+        dem.flat[dem_mask] = dem.max() + 1
+        inside = self._inside_indices(dem, mask=dem_mask)
+        grad = self._gradient_horn_1981(dem, inside)
 
-            dzdx = grad[0]
-            dzdy = grad[1]
+        dzdx = grad[0]
+        dzdy = grad[1]
 
-            # calculate slope from gradient
-            slope = np.zeros(dem.shape)
-            slope.flat[inside] = np.sqrt(dzdx*dzdx+dzdy*dzdy)
-            # calculate aspect from gradient
-            aspect = np.zeros(dem.shape)
-            # steepest descent is along the negative of the gradient
-            aspect.flat[inside] = (180.0/np.pi)*np.arctan2(-dzdx,-dzdy)
+        # calculate slope from gradient
+        slope = np.zeros(dem.shape)
+        slope.flat[inside] = np.sqrt(dzdx*dzdx+dzdy*dzdy)
+        # calculate aspect from gradient
+        aspect = np.zeros(dem.shape)
+        # steepest descent is along the negative of the gradient
+        aspect.flat[inside] = (180.0/np.pi)*np.arctan2(-dzdx,-dzdy)
 
-            # convert from [-180,180] to [0-360]
-            aspect[(aspect < 0)]+=360
+        # convert from [-180,180] to [0-360]
+        aspect[(aspect < 0)]+=360
 
-            self._output_handler(data=slope, out_name=slope_out_name, properties=properties,inplace=inplace, metadata=metadata)
-            self._output_handler(data=aspect, out_name=aspect_out_name, properties=properties,inplace=inplace, metadata=metadata)
-
-        except:
-            raise
-        return
+        self._output_handler(data=slope, out_name=slope_out_name, properties=properties,inplace=inplace, metadata=metadata)
+        self._output_handler(data=aspect, out_name=aspect_out_name, properties=properties,inplace=inplace, metadata=metadata)
 
     def cell_area(self, out_name='area', nodata_out=0, inplace=True, as_crs=None):
         """
@@ -3289,12 +3274,10 @@ class Grid(object):
             if is_geographic:
                 # Geographic CRS: coordinates are degrees. Use haversine to
                 # compute great-circle segment lengths along the reach.
-                dtr = np.pi/180.
-                re = 6.371e6
-                dist = np.power(np.sin(dtr*dlat/2),2) + np.cos(dtr*plat[:-1]) \
-                       * np.cos(dtr*plat[1:]) \
-                       * np.power(np.sin(dtr*dlon/2),2)
-                length = np.sum(re * 2 * np.arctan2(np.sqrt(dist),np.sqrt(1-dist)))
+                dist = np.power(np.sin(_DEG_TO_RAD*dlat/2),2) + np.cos(_DEG_TO_RAD*plat[:-1]) \
+                       * np.cos(_DEG_TO_RAD*plat[1:]) \
+                       * np.power(np.sin(_DEG_TO_RAD*dlon/2),2)
+                length = np.sum(_EARTH_RADIUS_M * 2 * np.arctan2(np.sqrt(dist),np.sqrt(1-dist)))
             else:
                 # Projected CRS: coordinates are already in linear units (meters
                 # for UTM). Euclidean distance between consecutive profile pixels.
@@ -4242,10 +4225,8 @@ class Grid(object):
             # Geographic CRS: approximate meter distances from degree offsets.
             # dx uses a cos(lat) correction for longitude convergence toward poles.
             # dy is simply arc length along a meridian.
-            re = 6.371e6
-            dtr = np.pi/180
-            dx = re * np.abs(np.multiply(dtr*dlon,np.cos(dtr*lat2d.flat[inside])))
-            dy = re * np.abs(dtr*dlat)
+            dx = _EARTH_RADIUS_M * np.abs(np.multiply(_DEG_TO_RAD*dlon,np.cos(_DEG_TO_RAD*lat2d.flat[inside])))
+            dy = _EARTH_RADIUS_M * np.abs(_DEG_TO_RAD*dlat)
         else:
             # Projected CRS (e.g. UTM): the affine transform maps pixel indices
             # directly to CRS coordinates in linear units (meters for UTM).
