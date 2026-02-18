@@ -156,6 +156,10 @@ def generate_v_valley(
         "nrows": nrows,
         "ncols": ncols,
         "base_elevation": base_elevation,
+        "channel_length": (nrows - 1) * pixel_size,
+        "channel_elev_drop": downstream_slope * (nrows - 1) * pixel_size,
+        "channel_slope": downstream_slope,
+        "num_profiles": 1,
     }
 
     return elev, expectations

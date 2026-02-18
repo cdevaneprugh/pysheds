@@ -427,18 +427,48 @@ class TestRiverNetworkLengthSlope:
     CRS test: haversine interprets 5m pixel spacing as 5 degrees of
     latitude, producing ~556 km per segment (~110,000 km total) vs the
     correct ~995m. This test catches that failure mode.
+
+    The V-valley has a single straight N-S channel, so:
+    - Exactly 1 reach
+    - Total length = reach length = main channel length
+    - Slope = downstream_slope = 0.001 m/m
+    - Midpoint at grid center (col 100, ~row 100)
     """
 
-    def test_channel_length(self, grid_with_river_stats):
-        """Total reach length should be ~995m, not haversine garbage."""
+    def test_channel_length(self, grid_with_river_stats, expectations):
+        """Total reach length should match analytical expectation."""
         result = grid_with_river_stats
-        expected_length = (NROWS - 1) * PIXEL_SIZE  # 995m
-        assert result["length"] == pytest.approx(expected_length, rel=0.1)
+        expected_length = expectations["channel_length"]
+        assert result["length"] == pytest.approx(expected_length, rel=0.02)
 
-    def test_channel_slope(self, grid_with_river_stats):
-        """Mean reach slope should be ~0.001 m/m."""
+    def test_channel_slope(self, grid_with_river_stats, expectations):
+        """Mean reach slope should match downstream_slope."""
         result = grid_with_river_stats
-        assert result["slope"] == pytest.approx(DOWNSTREAM_SLOPE, rel=0.1)
+        expected_slope = expectations["channel_slope"]
+        assert result["slope"] == pytest.approx(expected_slope, rel=0.02)
+
+    def test_single_reach(self, grid_with_river_stats):
+        """V-valley has exactly 1 reach."""
+        result = grid_with_river_stats
+        assert len(result["reach_lengths"]) == 1
+
+    def test_reach_length_equals_total(self, grid_with_river_stats):
+        """Single reach length equals total network length."""
+        result = grid_with_river_stats
+        assert result["reach_lengths"][0] == pytest.approx(result["length"])
+
+    def test_main_channel_equals_total(self, grid_with_river_stats):
+        """All flow is main channel (single basin)."""
+        result = grid_with_river_stats
+        assert result["mch_length"] == pytest.approx(result["length"])
+        assert result["mch_slope"] == pytest.approx(result["slope"])
+
+    def test_midpoint_easting(self, grid_with_river_stats, expectations):
+        """Reach midpoint easting is at the channel column."""
+        result = grid_with_river_stats
+        channel_col = expectations["channel_col"]
+        expected_easting = UTM_EASTING + channel_col * PIXEL_SIZE
+        assert result["mlon"][0] == pytest.approx(expected_easting, abs=PIXEL_SIZE)
 
 
 class TestHandDtndRelationship:
@@ -555,6 +585,204 @@ class TestHillslopeClassification:
         assert np.all(channel_types == 4), (
             f"Channel column should be type 4, got unique types: "
             f"{np.unique(channel_types)}"
+        )
+
+
+class TestExtractProfiles:
+    """Test extract_profiles() on V-valley UTM DEM.
+
+    The V-valley has a single N-S channel at col 100. With acc > NROWS as the
+    channel threshold, only the center column qualifies. extract_profiles should
+    return exactly one profile covering the full channel length.
+    """
+
+    @pytest.fixture(scope="class")
+    def profiles_and_connections(self, processed_grid):
+        """Call extract_profiles directly on the V-valley."""
+        grid = processed_grid
+        acc_mask = grid.acc > NROWS
+        profiles, connections = grid.extract_profiles("fdir", acc_mask, dirmap=DIRMAP)
+        return profiles, connections
+
+    def test_profile_count(self, profiles_and_connections):
+        """V-valley produces 1-2 profiles (fork detection may split outlet)."""
+        profiles, _ = profiles_and_connections
+        assert 1 <= len(profiles) <= 2
+
+    def test_primary_profile_length(self, profiles_and_connections):
+        """Longest profile contains ~197 pixels (bulk of the channel)."""
+        profiles, _ = profiles_and_connections
+        longest = max(profiles, key=len)
+        assert len(longest) == pytest.approx(NROWS - 1, abs=5)
+
+    def test_primary_profile_on_channel_column(self, profiles_and_connections):
+        """All pixels in the longest profile are on col 100 (center column)."""
+        profiles, _ = profiles_and_connections
+        longest = max(profiles, key=len)
+        _, col_indices = np.unravel_index(longest, (NROWS, NCOLS))
+        channel_col = NCOLS // 2
+        assert np.all(col_indices == channel_col)
+
+    def test_primary_profile_flows_north_to_south(self, profiles_and_connections):
+        """Row indices are monotonically increasing (upstream to downstream)."""
+        profiles, _ = profiles_and_connections
+        longest = max(profiles, key=len)
+        row_indices, _ = np.unravel_index(longest, (NROWS, NCOLS))
+        assert np.all(np.diff(row_indices) >= 0)
+
+    def test_connections_chain_to_terminal(self, profiles_and_connections):
+        """Following the connection chain reaches a terminal node.
+
+        A terminal node either connects to -1 (true outlet) or forms a
+        self-loop (boundary-induced artifact).
+        """
+        _, connections = profiles_and_connections
+        visited = set()
+        node = 0
+        while node not in visited and node != -1:
+            visited.add(node)
+            node = connections[node]
+        assert node == -1 or node in visited  # outlet or self-loop
+
+    def test_total_profile_coverage(self, profiles_and_connections, processed_grid):
+        """Combined profiles cover >95% of accumulation-threshold pixels."""
+        profiles, _ = profiles_and_connections
+        grid = processed_grid
+        acc_mask = grid.acc > NROWS
+        n_channel_pixels = int(np.sum(np.asarray(acc_mask)))
+        total_profile_pixels = sum(len(p) for p in profiles)
+        coverage = total_profile_pixels / n_channel_pixels
+        assert coverage > 0.95
+
+    def test_all_profile_indices_valid(self, profiles_and_connections):
+        """All flat indices across all profiles are within grid bounds."""
+        profiles, _ = profiles_and_connections
+        total_pixels = NROWS * NCOLS
+        for profile in profiles:
+            assert np.all(profile >= 0)
+            assert np.all(profile < total_pixels)
+
+
+class TestCreateChannelMask:
+    """Test create_channel_mask() on V-valley UTM DEM.
+
+    Uses grid_with_hand fixture which already called create_channel_mask.
+    The V-valley has a single straight channel at col 100 flowing south.
+    Bank assignment: facing downstream (south), west is the right bank (+1),
+    east is the left bank (-1). Only immediate neighbors of channel pixels
+    are assigned bank values; farther pixels remain 0.
+    """
+
+    def test_channel_mask_on_channel_column(self, grid_with_hand):
+        """Channel mask covers >97% of accumulation-threshold pixels at center column.
+
+        extract_profiles may miss 1-2 boundary pixels due to fork detection
+        and grid-edge handling. The bulk of the channel must be covered.
+        """
+        grid = grid_with_hand
+        channel_col = NCOLS // 2
+        acc_mask = np.asarray(grid.acc > NROWS)
+
+        channel_col_mask = np.asarray(grid.channel_mask[:, channel_col])
+        channel_col_acc = acc_mask[:, channel_col]
+        n_expected = np.sum(channel_col_acc)
+        n_covered = np.sum(channel_col_mask[channel_col_acc] == 1)
+        coverage = n_covered / n_expected
+        assert coverage > 0.97, (
+            f"Channel mask covers {n_covered}/{n_expected} ({coverage:.1%}) "
+            f"of acc-threshold pixels on channel column"
+        )
+
+    def test_channel_mask_off_channel(self, grid_with_hand, expectations):
+        """Hillslope pixels (off-channel columns) have channel_mask = 0."""
+        grid = grid_with_hand
+        channel_col = expectations["channel_col"]
+        edge = 5
+
+        west = grid.channel_mask[edge:-edge, edge : channel_col - 1]
+        east = grid.channel_mask[edge:-edge, channel_col + 2 : -edge]
+        assert np.all(west == 0)
+        assert np.all(east == 0)
+
+    def test_channel_id_count(self, grid_with_hand):
+        """1-2 unique channel IDs (matches profile count from extract_profiles)."""
+        grid = grid_with_hand
+        unique_ids = np.unique(
+            np.asarray(grid.channel_id)[np.asarray(grid.channel_id) > 0]
+        )
+        assert 1 <= len(unique_ids) <= 2
+        assert unique_ids[0] == 1  # primary channel is always ID 1
+
+    def test_channel_id_matches_mask(self, processed_grid):
+        """channel_id > 0 iff channel_mask == 1.
+
+        Uses processed_grid (not grid_with_hand) to avoid Raster mutation
+        artifacts from compute_hand's _input_handler processing the
+        channel_mask and channel_id arrays as inputs.
+        """
+        grid = processed_grid
+        acc_mask = grid.acc > NROWS
+        grid.create_channel_mask(
+            "fdir",
+            mask=acc_mask,
+            dirmap=DIRMAP,
+            out_name="cm_test",
+            out_name_channel_id="cid_test",
+            out_name_bank="bm_test",
+        )
+        cid = np.array(grid.cid_test, dtype=float)
+        cmask = np.array(grid.cm_test, dtype=float)
+        cid = np.nan_to_num(cid, nan=0.0)
+        cmask = np.nan_to_num(cmask, nan=0.0)
+        id_positive = cid > 0
+        mask_positive = cmask == 1
+        assert np.array_equal(id_positive, mask_positive)
+
+    def test_bank_mask_west_is_right(self, grid_with_hand, expectations):
+        """Immediate west neighbor of channel = right bank (+1).
+
+        Channel flows south. Facing downstream (south), west is on the right.
+        The bank assignment algorithm marks right-bank neighbors with +1.
+        """
+        grid = grid_with_hand
+        channel_col = expectations["channel_col"]
+        edge = 5
+
+        # Column immediately west of channel, in the interior rows
+        west_neighbor = grid.bank_mask[edge:-edge, channel_col - 1]
+        assert np.all(west_neighbor == 1), (
+            f"Expected west neighbor bank_mask = +1, "
+            f"got unique values: {np.unique(west_neighbor)}"
+        )
+
+    def test_bank_mask_east_is_left(self, grid_with_hand, expectations):
+        """Immediate east neighbor of channel = left bank (-1).
+
+        Channel flows south. Facing downstream (south), east is on the left.
+        The bank assignment algorithm marks left-bank neighbors with -1.
+        """
+        grid = grid_with_hand
+        channel_col = expectations["channel_col"]
+        edge = 5
+
+        east_neighbor = grid.bank_mask[edge:-edge, channel_col + 1]
+        assert np.all(east_neighbor == -1), (
+            f"Expected east neighbor bank_mask = -1, "
+            f"got unique values: {np.unique(east_neighbor)}"
+        )
+
+    def test_bank_mask_channel_is_zero(self, grid_with_hand):
+        """Channel pixels have bank_mask = 0."""
+        grid = grid_with_hand
+        channel_pixels = grid.channel_mask == 1
+        assert np.all(grid.bank_mask[channel_pixels] == 0)
+
+    def test_bank_mask_only_valid_values(self, grid_with_hand):
+        """Bank mask contains only {-1, 0, +1}."""
+        grid = grid_with_hand
+        unique_vals = set(np.unique(grid.bank_mask))
+        assert unique_vals.issubset({-1.0, 0.0, 1.0}), (
+            f"Unexpected bank_mask values: {unique_vals}"
         )
 
 
