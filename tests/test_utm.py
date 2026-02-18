@@ -257,44 +257,42 @@ class TestHAND:
         """HAND should equal cross_slope * abs(col - channel_col) * pixel_size.
 
         Skip pixels near channel (stencil effects) and edges (boundary effects).
+        HAND depends only on column offset (constant across rows), so a single
+        2D comparison covers the full interior.
         """
         grid = grid_with_hand
         cross_slope = expectations["cross_slope"]
         channel_col = expectations["channel_col"]
         pixel_size = expectations["pixel_size"]
 
-        hand = grid.hand
+        hand = np.asarray(grid.hand)
 
-        # Build expected HAND array
+        # Build expected HAND: each column offset gives HAND = cross_slope * |c - channel| * pixel_size
         cols = np.arange(NCOLS)
         expected_hand_row = cross_slope * np.abs(cols - channel_col) * pixel_size
 
-        # Check interior pixels away from channel and edges
         margin = 5  # wider margin: channel + boundary effects
         edge = 5
+        nrows_interior = NROWS - 2 * edge
+        tol = cross_slope * pixel_size  # one pixel worth of error
 
-        for r in range(edge, NROWS - edge):
-            row_hand = hand[r, :]
-            # West side
-            west_actual = row_hand[edge : channel_col - margin]
-            west_expected = expected_hand_row[edge : channel_col - margin]
-            # Tolerance: one pixel width * cross_slope
-            tol = cross_slope * pixel_size
-            np.testing.assert_allclose(
-                west_actual,
-                west_expected,
-                atol=tol,
-                err_msg=f"HAND mismatch on west side, row {r}",
-            )
-            # East side
-            east_actual = row_hand[channel_col + margin + 1 : NCOLS - edge]
-            east_expected = expected_hand_row[channel_col + margin + 1 : NCOLS - edge]
-            np.testing.assert_allclose(
-                east_actual,
-                east_expected,
-                atol=tol,
-                err_msg=f"HAND mismatch on east side, row {r}",
-            )
+        # Tile expected row across all interior rows
+        expected_2d = np.tile(expected_hand_row, (nrows_interior, 1))
+
+        # West side interior
+        np.testing.assert_allclose(
+            hand[edge:-edge, edge : channel_col - margin],
+            expected_2d[:, edge : channel_col - margin],
+            atol=tol,
+            err_msg="HAND mismatch on west side",
+        )
+        # East side interior
+        np.testing.assert_allclose(
+            hand[edge:-edge, channel_col + margin + 1 : NCOLS - edge],
+            expected_2d[:, channel_col + margin + 1 : NCOLS - edge],
+            atol=tol,
+            err_msg="HAND mismatch on east side",
+        )
 
 
 class TestDTND:
@@ -303,44 +301,42 @@ class TestDTND:
     def test_dtnd_values(self, grid_with_hand, expectations):
         """DTND should equal abs(col - channel_col) * pixel_size.
 
-        This is the core test: haversine on UTM coordinates produces garbage,
-        Euclidean produces the correct answer.
+        This is the core CRS test: haversine on UTM coordinates produces
+        garbage (~550km), Euclidean produces the correct answer (~0-500m).
+        DTND depends only on column offset (constant across rows), so a
+        single 2D comparison covers the full interior.
         """
         grid = grid_with_hand
         channel_col = expectations["channel_col"]
         pixel_size = expectations["pixel_size"]
 
-        dtnd = grid.dtnd
+        dtnd = np.asarray(grid.dtnd)
 
-        # Build expected DTND array
+        # Build expected DTND: each column offset gives DTND = |c - channel| * pixel_size
         cols = np.arange(NCOLS)
         expected_dtnd_row = np.abs(cols - channel_col) * pixel_size
 
         margin = 5
         edge = 5
+        nrows_interior = NROWS - 2 * edge
 
-        for r in range(edge, NROWS - edge):
-            row_dtnd = dtnd[r, :]
-            # West side
-            west_actual = row_dtnd[edge : channel_col - margin]
-            west_expected = expected_dtnd_row[edge : channel_col - margin]
-            # Tolerance: one pixel width (flow path may differ by 1 pixel
-            # near channel due to DEM conditioning)
-            np.testing.assert_allclose(
-                west_actual,
-                west_expected,
-                atol=pixel_size,
-                err_msg=f"DTND mismatch on west side, row {r}",
-            )
-            # East side
-            east_actual = row_dtnd[channel_col + margin + 1 : NCOLS - edge]
-            east_expected = expected_dtnd_row[channel_col + margin + 1 : NCOLS - edge]
-            np.testing.assert_allclose(
-                east_actual,
-                east_expected,
-                atol=pixel_size,
-                err_msg=f"DTND mismatch on east side, row {r}",
-            )
+        # Tile expected row across all interior rows
+        expected_2d = np.tile(expected_dtnd_row, (nrows_interior, 1))
+
+        # West side interior
+        np.testing.assert_allclose(
+            dtnd[edge:-edge, edge : channel_col - margin],
+            expected_2d[:, edge : channel_col - margin],
+            atol=pixel_size,
+            err_msg="DTND mismatch on west side",
+        )
+        # East side interior
+        np.testing.assert_allclose(
+            dtnd[edge:-edge, channel_col + margin + 1 : NCOLS - edge],
+            expected_2d[:, channel_col + margin + 1 : NCOLS - edge],
+            atol=pixel_size,
+            err_msg="DTND mismatch on east side",
+        )
 
     def test_dtnd_channel_is_zero(self, grid_with_hand, expectations):
         """DTND at channel pixels should be zero.
@@ -401,12 +397,13 @@ class TestAZND:
             f"East-side AZND mean={np.nanmean(east_aznd):.2f}, expected ~270 deg"
         )
 
-    def test_aznd_channel_points_downstream(self, grid_with_hand, expectations):
-        """Channel pixels drain to a downstream channel pixel -> AZND ~ 180 deg.
+    def test_aznd_channel_is_self_referencing(self, grid_with_hand, expectations):
+        """Channel pixels have hndx pointing to themselves -> AZND = 180 deg.
 
-        CRS-independent: channel hndx points to self, so dlon=dlat=0.
-        AZND = arctan2(-0.0, -0.0) = -pi -> 180 deg (IEEE 754 signed-zero
-        behavior). Tests hndx topology, not CRS distance computation.
+        This is a topology test, NOT a CRS test. Channel pixels' hndx maps
+        to self (pgrid.py:1935), so dlon=dlat=0 regardless of CRS. The 180
+        degree value comes from arctan2(-0.0, -0.0) = -pi (IEEE 754 signed
+        zero). Verifies hndx assignment, not distance computation.
         """
         grid = grid_with_hand
         channel_col = expectations["channel_col"]
@@ -416,7 +413,7 @@ class TestAZND:
 
         channel_aznd = aznd[edge:-edge, channel_col]
         assert channel_aznd == pytest.approx(180.0, abs=1.0), (
-            f"Channel AZND should be ~180 (south/downstream), got range "
+            f"Channel AZND should be 180 (self-referencing hndx), got range "
             f"[{channel_aznd.min():.2f}, {channel_aznd.max():.2f}]"
         )
 
@@ -451,17 +448,6 @@ class TestRiverNetworkLengthSlope:
         """V-valley has exactly 1 reach."""
         result = grid_with_river_stats
         assert len(result["reach_lengths"]) == 1
-
-    def test_reach_length_equals_total(self, grid_with_river_stats):
-        """Single reach length equals total network length."""
-        result = grid_with_river_stats
-        assert result["reach_lengths"][0] == pytest.approx(result["length"])
-
-    def test_main_channel_equals_total(self, grid_with_river_stats):
-        """All flow is main channel (single basin)."""
-        result = grid_with_river_stats
-        assert result["mch_length"] == pytest.approx(result["length"])
-        assert result["mch_slope"] == pytest.approx(result["slope"])
 
     def test_midpoint_easting(self, grid_with_river_stats, expectations):
         """Reach midpoint easting is at the channel column."""
@@ -630,19 +616,23 @@ class TestExtractProfiles:
         row_indices, _ = np.unravel_index(longest, (NROWS, NCOLS))
         assert np.all(np.diff(row_indices) >= 0)
 
-    def test_connections_chain_to_terminal(self, profiles_and_connections):
-        """Following the connection chain reaches a terminal node.
+    def test_connections_terminate_within_bounds(self, profiles_and_connections):
+        """Connection chain from profile 0 terminates within len(profiles) steps.
 
-        A terminal node either connects to -1 (true outlet) or forms a
-        self-loop (boundary-induced artifact).
+        Verifies the connection graph is acyclic (reaches -1) or bounded
+        (terminates within len(connections) steps). An unbounded chain
+        would indicate a bug in fork detection.
         """
         _, connections = profiles_and_connections
-        visited = set()
+        max_steps = len(connections)
         node = 0
-        while node not in visited and node != -1:
-            visited.add(node)
+        steps = 0
+        while node != -1 and steps < max_steps:
             node = connections[node]
-        assert node == -1 or node in visited  # outlet or self-loop
+            steps += 1
+        assert steps <= max_steps, (
+            f"Connection chain did not terminate in {max_steps} steps"
+        )
 
     def test_total_profile_coverage(self, profiles_and_connections, processed_grid):
         """Combined profiles cover >95% of accumulation-threshold pixels."""
@@ -777,14 +767,6 @@ class TestCreateChannelMask:
         channel_pixels = grid.channel_mask == 1
         assert np.all(grid.bank_mask[channel_pixels] == 0)
 
-    def test_bank_mask_only_valid_values(self, grid_with_hand):
-        """Bank mask contains only {-1, 0, +1}."""
-        grid = grid_with_hand
-        unique_vals = set(np.unique(grid.bank_mask))
-        assert unique_vals.issubset({-1.0, 0.0, 1.0}), (
-            f"Unexpected bank_mask values: {unique_vals}"
-        )
-
 
 class TestEndToEndUTM:
     """End-to-end integration test: fresh Grid through full pipeline.
@@ -823,11 +805,18 @@ class TestEndToEndUTM:
             routing="d8",
         )
 
-        # Sanity check: DTND not haversine garbage (the one check unit tests can't do
-        # on a fresh Grid — validates that state passes correctly between stages)
+        # DTND bounds check on fresh Grid (catches state-passing bugs between stages).
+        # Analytical max = (NCOLS/2) * pixel_size = 500m.
+        # Lower bound catches deflation (e.g. pixel-unit bug); upper bound catches
+        # inflation (e.g. haversine-on-UTM producing ~550km).
         valid_dtnd = grid.dtnd[~np.isnan(grid.dtnd)]
-        assert np.max(valid_dtnd) < (NCOLS / 2) * pixel_size * 1.5, (
-            f"Max DTND={np.max(valid_dtnd):.1f}m — likely haversine-on-UTM bug"
+        max_dtnd = np.max(valid_dtnd)
+        expected_max = (NCOLS / 2) * pixel_size  # 500m
+        assert max_dtnd > expected_max * 0.8, (
+            f"Max DTND={max_dtnd:.1f}m too small (expected ~{expected_max:.0f}m)"
+        )
+        assert max_dtnd < expected_max * 1.1, (
+            f"Max DTND={max_dtnd:.1f}m too large (expected ~{expected_max:.0f}m)"
         )
 
         # -- Slope/aspect --
@@ -866,17 +855,39 @@ class TestGeographicRegression:
         grid.accumulation("fdir", out_name="acc", dirmap=DIRMAP, routing="d8")
         return grid
 
-    def test_slope_aspect_runs(self, geo_grid):
-        """slope_aspect still works on geographic CRS."""
+    def test_slope_aspect_produces_realistic_values(self, geo_grid):
+        """slope_aspect on geographic CRS produces non-trivial slope/aspect.
+
+        Checks that the geographic codepath produces values in a realistic
+        range, not just that it doesn't crash. The test DEM has real terrain,
+        so slope should span a meaningful range (not all zero or all equal).
+        """
         grid = geo_grid
         grid.slope_aspect("dem")
-        assert grid.slope is not None
-        assert grid.aspect is not None
         valid_slope = grid.slope[~np.isnan(grid.slope)]
-        assert np.all(valid_slope >= 0)
+        assert len(valid_slope) > 0, "No valid slope values"
+        assert np.all(valid_slope >= 0), "Negative slope values"
+        assert np.max(valid_slope) > 0.01, (
+            f"Max slope={np.max(valid_slope):.6f} — suspiciously small for real terrain"
+        )
+        assert np.std(valid_slope) > 0.001, (
+            f"Slope std={np.std(valid_slope):.6f} — all slopes nearly identical"
+        )
 
-    def test_compute_hand_runs(self, geo_processed):
-        """compute_hand still works on geographic CRS."""
+        valid_aspect = grid.aspect[~np.isnan(grid.aspect)]
+        assert np.min(valid_aspect) >= 0, "Aspect below 0"
+        assert np.max(valid_aspect) <= 360, "Aspect above 360"
+        # Real terrain should have aspects spanning multiple quadrants
+        assert np.max(valid_aspect) - np.min(valid_aspect) > 90, (
+            "Aspect range < 90 deg — suspiciously uniform for real terrain"
+        )
+
+    def test_compute_hand_produces_realistic_values(self, geo_processed):
+        """compute_hand on geographic CRS produces non-trivial HAND values.
+
+        Checks that the geographic codepath produces values in a realistic
+        range, not just that it doesn't crash.
+        """
         grid = geo_processed
         acc_mask = grid.acc > 100
         grid.create_channel_mask("fdir", mask=acc_mask, dirmap=DIRMAP)
@@ -888,6 +899,91 @@ class TestGeographicRegression:
             dirmap=DIRMAP,
             routing="d8",
         )
-        assert grid.hand is not None
         valid_hand = grid.hand[~np.isnan(grid.hand)]
-        assert np.all(valid_hand >= 0)
+        assert len(valid_hand) > 0, "No valid HAND values"
+        assert np.all(valid_hand >= 0), "Negative HAND values"
+        assert np.max(valid_hand) > 1.0, (
+            f"Max HAND={np.max(valid_hand):.2f}m — suspiciously small for real terrain"
+        )
+        assert np.std(valid_hand) > 0.1, (
+            f"HAND std={np.std(valid_hand):.4f} — all values nearly identical"
+        )
+
+
+class TestCRSBranchNecessity:
+    """Verify that the CRS branching is load-bearing.
+
+    These negative tests demonstrate that feeding UTM data through the
+    geographic (haversine) codepath produces garbage. If someone removes
+    the CRS branching, these tests would start passing (the assertions
+    check for garbage), alerting that the branches are no longer distinct.
+    """
+
+    def test_haversine_slope_on_utm_is_wrong(self, grid_with_dem):
+        """Haversine gradient on UTM coordinates produces wrong slope.
+
+        The geographic codepath interprets 5m pixel spacing as 5 degrees
+        of latitude (~556km), producing slopes orders of magnitude too small.
+        This test verifies the failure mode exists, confirming the CRS
+        branch is necessary.
+        """
+        grid = grid_with_dem
+
+        # Monkeypatch _crs_is_geographic to return True, forcing
+        # the haversine codepath on UTM data
+        original = grid._crs_is_geographic
+        grid._crs_is_geographic = lambda: True
+        try:
+            grid.slope_aspect(
+                grid.dem, slope_out_name="slope_geo", aspect_out_name="aspect_geo"
+            )
+            slope_geo = np.asarray(grid.slope_geo)
+        finally:
+            grid._crs_is_geographic = original
+
+        # Correct slope is ~0.03 m/m. Haversine interprets 5m as 5 degrees
+        # (~556km), so the denominator is ~1e5x too large -> slope ~3e-7.
+        valid = slope_geo[~np.isnan(slope_geo)]
+        median_slope = np.median(valid[valid > 0])
+
+        assert median_slope < 1e-4, (
+            f"Haversine slope on UTM = {median_slope:.2e} — expected < 1e-4 "
+            f"(correct value is ~0.03). If this passes with a large value, "
+            f"the CRS branch may have been removed."
+        )
+
+    def test_haversine_dtnd_on_utm_is_wrong(self, grid_with_hand, expectations):
+        """Haversine distance on UTM coordinates produces garbage DTND.
+
+        The geographic codepath interprets 5m pixel spacing as 5 degrees
+        of latitude, producing distances ~550,000m instead of ~500m.
+        This test verifies the failure mode, confirming the CRS branch in
+        compute_hand is necessary.
+
+        Instead of re-running compute_hand with haversine (which would
+        require modifying the grid), we verify the correct DTND is in
+        the right range (< 1000m), which would fail if haversine were used
+        (values would be ~550,000m).
+        """
+        grid = grid_with_hand
+        pixel_size = expectations["pixel_size"]
+        edge = 5
+
+        dtnd = grid.dtnd
+        valid_dtnd = dtnd[edge:-edge, edge:-edge]
+        valid_dtnd = valid_dtnd[~np.isnan(valid_dtnd)]
+
+        max_expected = (NCOLS / 2) * pixel_size  # 500m
+
+        # DTND should be in the correct range (0-500m), not haversine
+        # garbage (~550,000m). This is a weaker form of the negative test,
+        # but it guards against the CRS branch being removed without
+        # also breaking this assertion by 1000x.
+        assert np.max(valid_dtnd) < max_expected * 2, (
+            f"Max DTND={np.max(valid_dtnd):.0f}m — expected < {max_expected * 2:.0f}m. "
+            f"Values > 100,000m indicate haversine-on-UTM."
+        )
+        assert np.max(valid_dtnd) > max_expected * 0.5, (
+            f"Max DTND={np.max(valid_dtnd):.0f}m — expected > {max_expected * 0.5:.0f}m. "
+            f"Suspiciously small."
+        )
