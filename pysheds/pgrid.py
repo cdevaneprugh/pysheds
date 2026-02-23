@@ -1968,7 +1968,7 @@ class Grid(object):
                     # channel pixel — it's the distance to the specific channel pixel
                     # found by tracing D8 flow directions downstream.
                     #
-                    # hndx (computed above at line ~1923) stores the flat array index
+                    # hndx (computed above at line ~1954) stores the flat array index
                     # of each pixel's drainage outlet. It's CRS-independent — purely
                     # topological, determined by the D8 flow direction graph.
                     #
