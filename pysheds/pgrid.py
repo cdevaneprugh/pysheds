@@ -3312,7 +3312,7 @@ class Grid(object):
         return {'length':total_reach_length,'slope':mean_reach_slope,
                 'mch_length':total_mch_length,'mch_slope':mean_mch_slope,
                 'reach_slopes':reach_slopes,'reach_lengths':reach_length,
-                'mlon':rx,'mlat':ry}
+                'mlon':rx,'mlat':ry}  # Keys retained for API compatibility
 
     def _translate_dict(self,a,d):
         # a is an array of direction values (1,2,4,8,32,64,128)
@@ -4171,7 +4171,37 @@ class Grid(object):
 
     def _gradient_horn_1981(self, dem, inside):
         """
-        Calculate gradient of a dem.
+        Compute elevation gradient using the Horn (1981) weighted finite-difference stencil.
+
+        Uses a 3x3 window with cardinal neighbors weighted 2x relative to diagonal
+        neighbors, then divides by 8 * cell_spacing to obtain the gradient in each axis.
+
+        Parameters
+        ----------
+        dem : numpy.ndarray
+            2-D elevation array.
+        inside : numpy.ndarray
+            Flat (raveled) indices of interior pixels to compute gradients for.
+
+        Returns
+        -------
+        [dzdx, dzdy] : list of numpy.ndarray
+            dzdx : d(elev)/d(east)  — positive when elevation increases eastward.
+            dzdy : d(elev)/d(north) — positive when elevation increases northward.
+
+        Notes
+        -----
+        Sign convention: neighbors are indexed by compass direction
+        (N, NE, E, SE, S, SW, W, NW), so the stencil sums are oriented
+        geographically regardless of array storage order. This differs from
+        np.gradient, whose sign depends on whether row 0 is the north or
+        south edge of the raster.
+
+        CRS handling:
+        - Geographic (lat/lon): pixel spacings converted from degrees to
+          meters via haversine approximation with cos(lat) correction for
+          longitude convergence.
+        - Projected (e.g. UTM): coordinate offsets used directly as meters.
         """
         warnings.filterwarnings(action='ignore', message='Invalid value encountered',
                                    category=RuntimeWarning)
@@ -4214,12 +4244,16 @@ class Grid(object):
         mean_cell_dx = 0.5 * np.sum(cell_dx[[2,6],:],axis=0)
         mean_cell_dy = 0.5 * np.sum(cell_dy[[0,4],:],axis=0)
 
-        # for x gradient sum [NE,2xE,SE,-NW,-2xW,-SW]
-        # for y gradient sum [NE,2xN,NW,-SE,-2xS,-SW]
-        haxindices = [1,2,2,3]  #add
-        hsxindices = [5,6,6,7]  #subtract
-        hayindices = [0,0,1,7]  #add
-        hsyindices = [3,4,4,5]  #subtract
+        # Horn 1981 stencil weights (cardinal neighbors weighted 2x):
+        #
+        #   dz/dx = (z_NE + 2*z_E + z_SE - z_NW - 2*z_W - z_SW) / (8 * dx)
+        #   dz/dy = (z_NW + 2*z_N + z_NE - z_SW - 2*z_S - z_SE) / (8 * dy)
+        #
+        # Neighbor index mapping: [N=0, NE=1, E=2, SE=3, S=4, SW=5, W=6, NW=7]
+        haxindices = [1,2,2,3]  # dzdx add:      NE, E, E, SE
+        hsxindices = [5,6,6,7]  # dzdx subtract:  SW, W, W, NW
+        hayindices = [0,0,1,7]  # dzdy add:       N, N, NE, NW
+        hsyindices = [3,4,4,5]  # dzdy subtract:  SE, S, S, SW
 
         dzdx = (np.sum(elev_neighbors[haxindices,:],axis=0) - np.sum(elev_neighbors[hsxindices,:],axis=0)) / (8.*mean_cell_dx)
         dzdy = (np.sum(elev_neighbors[hayindices,:],axis=0) - np.sum(elev_neighbors[hsyindices,:],axis=0)) / (8.*mean_cell_dy)
