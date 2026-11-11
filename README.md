@@ -1,3 +1,32 @@
+# pysheds — OSBS representative-hillslope fork
+
+This fork of [mdbartos/pysheds](https://github.com/mdbartos/pysheds) supplies flow routing, HAND and distance-to-nearest-drainage (DTND) for the OSBS representative-hillslope pipeline, an application of Swenson & Lawrence (2025) to 1 m NEON LiDAR. It is used as a git submodule of that pipeline's repository. Upstream's README follows below.
+
+## What differs from upstream
+
+- **`pysheds/pgrid.py`** is Swenson's hillslope version of `pgrid.py`, taken from [swensosc/pysheds](https://github.com/swensosc/pysheds) at commit `d98738d` (the version pinned by [Representative_Hillslopes](https://github.com/swensosc/Representative_Hillslopes)). It adds `slope_aspect`, `create_channel_mask`, `compute_hand` (HAND plus DTND, azimuth to drainage, and drainage ID), `compute_hillslope`, `extract_profiles` and `river_network_length_and_slope`.
+- **Projected CRS support.** Swenson's code assumes geographic coordinates (haversine distances, degree-based gradients). This fork adds a projected-CRS path for UTM grids: Euclidean distances and gradients in the grid's linear units. The geographic path is still exercised by the pipeline's MERIT validation against Swenson's published global dataset.
+- **`pysheds/grid.py`** falls back to `pgrid.Grid` when numba is not installed, instead of raising.
+- **Tests.** `tests/test_utm.py`, `test_hillslope.py`, `test_split_valley.py` and `test_depression_basin.py` check the hillslope methods against closed-form results on synthetic DEMs. The DEMs and their generators are in `data/synthetic_valley/`. `tests/conftest.py` uses the `pgrid` API; upstream's `test_grid.py`, written for the numba `sGrid` API, is skipped.
+
+## Usage
+
+The pipeline imports `pysheds.pgrid.Grid` directly with this directory on `sys.path`. To use it on its own:
+
+```bash
+export PYTHONPATH=/path/to/pysheds:$PYTHONPATH
+python -c "from pysheds.pgrid import Grid"
+pytest tests/
+```
+
+Dependencies are those in `setup.py`: numpy, scipy, pandas, pyproj, rasterio, affine, geojson, looseversion, scikit-image, numba.
+
+## License and citation
+
+GPL-3.0, as upstream (see `LICENSE`). If you use the hillslope methods, please cite Swenson & Lawrence (2025), *JAMES* 17, e2024MS004410, [doi:10.1029/2024MS004410](https://doi.org/10.1029/2024MS004410), and pysheds (Bartos, M.).
+
+---
+
 # pysheds [![Build Status](https://github.com/mdbartos/pysheds/actions/workflows/python-package.yml/badge.svg)](https://github.com/mdbartos/pysheds/actions) [![Coverage Status](https://coveralls.io/repos/github/mdbartos/pysheds/badge.svg?branch=master&service=github)](https://coveralls.io/github/mdbartos/pysheds?branch=master) [![Python Versions](https://img.shields.io/pypi/pyversions/pysheds)](https://pypi.python.org/pypi/pysheds)
 🌎 Simple and fast watershed delineation in python.
 
