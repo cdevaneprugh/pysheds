@@ -96,3 +96,6 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# Plots written by data/synthetic_valley/generate_*.py
+data/synthetic_valley/plots/

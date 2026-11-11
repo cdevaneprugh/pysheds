@@ -1,4 +1,4 @@
-# Synthetic DEMs for Phase A Testing
+# Synthetic DEMs for UTM CRS Testing
 
 ## Overview
 
@@ -234,7 +234,7 @@ Affine(pixel_size, 0, utm_easting, 0, -pixel_size, utm_northing)
 - `dzdx = d(elev)/d(col) = d(elev)/d(east)` -- correct as-is
 - `dzdy = d(elev)/d(row) = d(elev)/d(south) = -d(elev)/d(north)` -- **sign is flipped**
 
-### The pipeline bug (run_pipeline.py:1527)
+### The aspect sign bug (an earlier OSBS pipeline version; since fixed)
 
 ```python
 aspect = np.degrees(np.arctan2(-dzdx, -dzdy))
@@ -263,9 +263,9 @@ The error is small because the cross-slope (0.03) dominates the downstream slope
 
 ## Aspect Relevance for 1-Hillslope Configurations
 
-For a 1-hillslope configuration with N elevation bins (no aspect binning -- our planned OSBS setup), the aspect sign bug doesn't affect output at all. Without aspect binning, no pixels get assigned to wrong hillslopes. You'd still want the correct aspect value for the single hillslope's circular mean (CTSM uses it for aspect-dependent insolation), but at OSBS slopes of 0.01-0.06 m/m the insolation correction is negligible regardless.
+For a 1-hillslope configuration with N elevation bins (no aspect binning -- the OSBS configuration this fork was built for), the aspect sign bug doesn't affect output at all. Without aspect binning, no pixels get assigned to wrong hillslopes. You'd still want the correct aspect value for the single hillslope's circular mean (CTSM uses it for aspect-dependent insolation), but at OSBS slopes of 0.01-0.06 m/m the insolation correction is negligible regardless.
 
-The detailed aspect analysis in this README is here for completeness and for anyone using 4-aspect configurations, where the N/S swap corrupts aspect-based binning and area fractions for all 16 hillslope columns. See `STATUS.md` problem #4 for the full corruption chain.
+The detailed aspect analysis in this README is here for completeness and for anyone using 4-aspect configurations, where the N/S swap corrupts aspect-based binning and area fractions for all 16 hillslope columns. The swap moves pixels between the N and S hillslopes, so their bin assignments, areas and area fractions are all wrong.
 
 ## Bug Detection Summary
 
@@ -402,7 +402,7 @@ Columns 451-460: geographically closer to Channel B, but hydrologically drain to
 ```bash
 python data/synthetic_valley/generate_split_valley.py
 # Output: data/synthetic_valley/split_valley_utm.tif
-# Plots:  $SWENSON/output/plots/synthetic_dem_audit/split_valley_*.png
+# Plots:  data/synthetic_valley/plots/split_valley_*.png (or $PLOT_DIR)
 ```
 
 ```python
@@ -502,7 +502,7 @@ The Garbrecht-Martz algorithm assigns micro-gradients across the flat. Flow dire
 ```bash
 python data/synthetic_valley/generate_depression_basin.py
 # Output: data/synthetic_valley/depression_basin_utm.tif
-# Plots:  $SWENSON/output/plots/synthetic_dem_audit/depression_basin_*.png
+# Plots:  data/synthetic_valley/plots/depression_basin_*.png (or $PLOT_DIR)
 ```
 
 ```python

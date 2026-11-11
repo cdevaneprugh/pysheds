@@ -52,30 +52,10 @@ UTM_EASTING = 400000.0
 UTM_NORTHING = 3286000.0
 NODATA = -9999.0
 
-# Plot output directory
-PLOT_DIR = os.path.join(
-    os.path.dirname(os.path.realpath(__file__)),
-    "..",
-    "..",
-    "..",
-    "hpg-esm-tools",
-    "swenson",
-    "output",
-    "plots",
-    "synthetic_dem_audit",
+# Plot output directory (override with $PLOT_DIR)
+PLOT_DIR = os.environ.get(
+    "PLOT_DIR", os.path.join(os.path.dirname(os.path.realpath(__file__)), "plots")
 )
-# Resolve to absolute; fall back to env var if relative traversal fails
-PLOT_DIR = os.path.normpath(PLOT_DIR)
-if not os.path.isdir(os.path.dirname(PLOT_DIR)):
-    PLOT_DIR = os.path.join(
-        os.environ.get(
-            "SWENSON",
-            "/blue/gerber/cdevaneprugh/hpg-esm-tools/swenson",
-        ),
-        "output",
-        "plots",
-        "synthetic_dem_audit",
-    )
 
 
 def generate_split_valley() -> tuple[np.ndarray, dict]:

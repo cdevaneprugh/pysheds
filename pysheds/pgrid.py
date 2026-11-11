@@ -1996,8 +1996,8 @@ class Grid(object):
                         # exact on the projected plane. UTM distortion is < 0.04%
                         # within a single zone, so the error is negligible.
                         #
-                        # This branch replaces the EDT workaround that the OSBS
-                        # pipeline (run_pipeline.py) used before Phase A. That
+                        # This branch replaces the EDT workaround used by earlier
+                        # versions of the OSBS hillslope pipeline. That
                         # workaround used scipy.ndimage.distance_transform_edt,
                         # which computed correct Euclidean distances but to the
                         # geographically nearest channel pixel — not the
